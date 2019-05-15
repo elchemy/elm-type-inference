@@ -22,6 +22,7 @@ literals =
         , test "Float" <| code "1.2" <| Ok Type.float
         , test "Lambda" <| code "\\a -> a" <| Ok (TArrow (TAny 0) (TAny 0))
         , test "List" <| codeWithContext listEnv "[1,2,3]" <| Ok (Type.list Type.int)
+        , test "BinOp" <| codeWithContext stringEnv "\"a\" ++ \"b\"" <| Ok Type.string
         ]
 
 
@@ -32,9 +33,12 @@ lets =
         , test "String" <| code "let a = \"a\" in a" <| Ok Type.string
         , test "Float" <| code "let a = 2.2 in a" <| Ok Type.float
         , test "Rearanged" <| code "let a = b \n b = 1.2 in a" <| Ok Type.float
-
-        -- , test "Recursion" <| code "let a b c = a b c in a 10" Type.int
-        -- , test "Lambda" <| code "let a b = b in a" (TArrow (TAny 0) (TAny 0))
+        , test "Recursion" <|
+            codeWithContext stringEnv
+                "let a b c = a ( b ++ \"1\") (c ++ \"1\") ++ \"1\" in a"
+            <|
+                Ok (Type.string => Type.string => Type.string)
+        , test "Lambda" <| code "let a b c = b in a" <| Ok (TAny 4 => TAny 5 => TAny 4)
         ]
 
 
@@ -88,4 +92,12 @@ listEnv =
     Dict.singleton "(::)"
         ( [ 1 ]
         , unconstrained <| TAny 1 => Type.list (TAny 1) => Type.list (TAny 1)
+        )
+
+
+stringEnv : Environment
+stringEnv =
+    Dict.singleton "(++)"
+        ( []
+        , unconstrained <| Type.string => Type.string => Type.string
         )

@@ -40,7 +40,7 @@ expression_ ( e, meta ) =
                         ( InferExp.Call
                             ( InferExp.Call
                                 ( InferExp.Name "(::)", m )
-                                ( expression_ ( x, m ) )
+                                (expression_ ( x, m ))
                             , m
                             )
                             acc
@@ -55,12 +55,44 @@ expression_ ( e, meta ) =
         ELambda (( EVariable [ first ], vmeta ) :: rest) body ->
             ( InferExp.Lambda first (expression_ <| ( ELambda rest body, vmeta )), meta )
 
-        -- Aplication
         EApplication l r ->
             ( InferExp.Call (expression_ l) (expression_ r), meta )
 
+        EBinOp ( EVariable [ opName ], opMeta ) l r ->
+            expression_
+                ( EApplication
+                    ( EApplication
+                        ( EVariable [ "(" ++ opName ++ ")" ], opMeta )
+                        l
+                    , opMeta
+                    )
+                    r
+                , meta
+                )
+
         _ ->
             Debug.crash "Not implemented"
+
+
+gatherArgs_ :
+    ( AstExpression, a )
+    -> ( Name, List AstMExp )
+    -> ( Name, List AstMExp )
+gatherArgs_ ( a, _ ) ( accName, accArgs ) =
+    case a of
+        EApplication ( EVariable [ bindingName ], _ ) ( EVariable [ varName ], varMeta ) ->
+            ( bindingName, ( EVariable [ varName ], varMeta ) :: accArgs )
+
+        EApplication ( EApplication l r, appMeta ) ( EVariable [ varName ], varMeta ) ->
+            gatherArgs_ ( EApplication l r, appMeta ) ( accName, ( EVariable [ varName ], varMeta ) :: accArgs )
+
+        _ ->
+            Debug.crash <| "Cannot gather args for " ++ toString a
+
+
+gatherArgs : AstMExp -> ( Name, List AstMExp )
+gatherArgs e =
+    gatherArgs_ e ( "", [] )
 
 
 bindings :
@@ -68,10 +100,16 @@ bindings :
     -> List ( Name, InferExp.MExp )
 bindings =
     List.map
-        (\( ( l, _ ), r ) ->
+        (\( ( l, m ), r ) ->
             case l of
                 EVariable [ name ] ->
                     ( name, expression_ r )
+
+                EApplication _ _ ->
+                    gatherArgs ( l, m )
+                        |> (\( name, args ) ->
+                                ( name, expression_ ( ELambda args r, m ) )
+                           )
 
                 e ->
                     Debug.crash (toString e ++ " is not a supported variable definition yet")
