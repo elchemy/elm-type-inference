@@ -1,23 +1,25 @@
 module Infer exposing (typeOf)
 
 {-| This is the module implementing type inference. You'll also need at least `Infer.Expression`.
+
 @docs typeOf
+
 -}
 
 import Dict
 import Infer.Bindings as Bindings
 import Infer.ConstraintGen exposing (..)
-import Infer.Expression exposing (Expression(..))
+import Infer.Expression exposing (Expression(..), MExp)
 import Infer.InternalMonad exposing (..)
 import Infer.Monad as External
 import Infer.Scheme exposing (Environment, Scheme, generalize)
-import Infer.Type as Type exposing (($), Substitution, Type, RawType(..), (=>), substitute)
+import Infer.Type as Type exposing (($), (=>), RawType(..), Substitution, Type, substitute)
 
 
 {-| Returns a computation that yields the type of the input expression
 with the specified environment.
 -}
-typeOf : Environment -> Expression -> External.Monad ( Type, Substitution )
+typeOf : Environment -> MExp -> External.Monad ( Type, Substitution )
 typeOf env exp =
     generateConstraints env exp
         |> andThen
@@ -50,7 +52,7 @@ substituteConstraint substitution ( l, r ) =
         f =
             Type.substitute substitution
     in
-        ( f l, f r )
+    ( f l, f r )
 
 
 freshTypevar : Monad RawType
@@ -60,8 +62,8 @@ freshTypevar =
         |> map TAny
 
 
-generateConstraints : Environment -> Expression -> Monad ( Type, List Constraint )
-generateConstraints environment exp =
+generateConstraints : Environment -> MExp -> Monad ( Type, List Constraint )
+generateConstraints environment ( exp, _ ) =
     case exp of
         Name name ->
             variable environment name
@@ -106,7 +108,7 @@ generateConstraints environment exp =
                     )
 
 
-addBindingGroupToEnv : List ( String, Expression ) -> Environment -> Monad Environment
+addBindingGroupToEnv : List ( String, MExp ) -> Environment -> Monad Environment
 addBindingGroupToEnv bindings origEnv =
     let
         bindings_ =
@@ -137,18 +139,18 @@ addBindingGroupToEnv bindings origEnv =
                 >> solve Dict.empty
                 >> fromResult
     in
-        typesAndConstraints
-            |> andThen
-                (\tcs ->
-                    subs tcs
-                        |> andThen
-                            (\subs ->
-                                List.map Tuple.first tcs
-                                    |> List.map (substitute subs >> generalize origEnv)
-                                    |> List.map2 (,) (List.map Tuple.first bindings)
-                                    |> Dict.fromList
-                                    |> (\new -> Dict.union new origEnv)
-                                    |> pure
-                                    |> addSubstitution subs
-                            )
-                )
+    typesAndConstraints
+        |> andThen
+            (\tcs ->
+                subs tcs
+                    |> andThen
+                        (\subs ->
+                            List.map Tuple.first tcs
+                                |> List.map (substitute subs >> generalize origEnv)
+                                |> List.map2 (,) (List.map Tuple.first bindings)
+                                |> Dict.fromList
+                                |> (\new -> Dict.union new origEnv)
+                                |> pure
+                                |> addSubstitution subs
+                        )
+            )

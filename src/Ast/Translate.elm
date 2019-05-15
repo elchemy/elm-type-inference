@@ -1,7 +1,8 @@
 module Ast.Translate exposing (expression)
 
+import Ast.Common exposing (Name)
 import Ast.Expression as AstExp exposing (..)
-import Infer.Expression as InferExp
+import Infer.Expression as InferExp exposing (AstExpression(..), AstMExp, generateIds)
 import Infer.Type as Type exposing (Type, unconstrained)
 
 
@@ -9,55 +10,72 @@ type alias ExMeta =
     {}
 
 
-expression : Expression -> InferExp.Expression
+expression : MExp -> InferExp.MExp
 expression e =
+    generateIds e |> expression_
+
+
+expression_ : AstMExp -> InferExp.MExp
+expression_ ( e, meta ) =
     case e of
-        Let bindingList body ->
-            InferExp.Let (bindings bindingList) (expression body)
+        ELet bindingList body ->
+            ( InferExp.Let (bindings bindingList) (expression_ body), meta )
 
-        Variable [ name ] ->
-            InferExp.Name name
+        EVariable [ name ] ->
+            ( InferExp.Name name, meta )
 
-        Integer _ ->
-            literal Type.int
+        EInteger _ ->
+            ( literal Type.int, meta )
 
-        Float _ ->
-            literal Type.float
+        EFloat _ ->
+            ( literal Type.float, meta )
 
-        String _ ->
-            literal Type.string
+        EString _ ->
+            ( literal Type.string, meta )
 
-        --List elems ->
-        --    literal <| Type.list (getCommonType elems)
-        -- Lambdas
-        Lambda ((Variable [ only ]) :: []) body ->
-            InferExp.Lambda only (expression body)
+        EList elems ->
+            elems
+                |> List.foldr
+                    (\( x, m ) acc ->
+                        ( InferExp.Call
+                            ( InferExp.Call
+                                ( InferExp.Name "(::)", m )
+                                ( expression_ ( x, m ) )
+                            , m
+                            )
+                            acc
+                        , m
+                        )
+                    )
+                    ( literal <| Type.list (Type.TAny -1), meta )
 
-        Lambda ((Variable [ first ]) :: rest) body ->
-            InferExp.Lambda first (expression <| Lambda rest body)
+        ELambda (( EVariable [ only ], _ ) :: []) body ->
+            ( InferExp.Lambda only (expression_ body), meta )
+
+        ELambda (( EVariable [ first ], vmeta ) :: rest) body ->
+            ( InferExp.Lambda first (expression_ <| ( ELambda rest body, vmeta )), meta )
 
         -- Aplication
-        Application l r ->
-            InferExp.Call (expression l) (expression r)
+        EApplication l r ->
+            ( InferExp.Call (expression_ l) (expression_ r), meta )
 
         _ ->
             Debug.crash "Not implemented"
 
 
 bindings :
-    List ( Expression, Expression )
-    -> List ( String, InferExp.Expression )
-bindings list =
-    list
-        |> List.map
-            (\binding ->
-                case binding of
-                    ( Variable [ name ], r ) ->
-                        ( name, expression r )
+    List ( AstMExp, AstMExp )
+    -> List ( Name, InferExp.MExp )
+bindings =
+    List.map
+        (\( ( l, _ ), r ) ->
+            case l of
+                EVariable [ name ] ->
+                    ( name, expression_ r )
 
-                    e ->
-                        Debug.crash (toString e ++ " is not a supported variable definition yet")
-            )
+                e ->
+                    Debug.crash (toString e ++ " is not a supported variable definition yet")
+        )
 
 
 literal : Type.RawType -> InferExp.Expression

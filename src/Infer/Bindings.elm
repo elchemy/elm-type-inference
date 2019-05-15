@@ -1,12 +1,12 @@
 module Infer.Bindings exposing (group)
 
 import Dict exposing (Dict)
-import Infer.Expression exposing (Expression(..))
+import Infer.Expression exposing (Expression(..), MExp)
 import List.Extra as List exposing (dropWhile, unique)
 import Set exposing (Set)
 
 
-group : List ( String, Expression ) -> List (List ( String, Expression ))
+group : List ( String, MExp ) -> List (List ( String, MExp ))
 group bindings_ =
     let
         bindings =
@@ -20,17 +20,17 @@ group bindings_ =
                 (always (freeVariables >> Set.filter (\x -> List.member x nodes)))
                 bindings
     in
-        stronglyConnected nodes neighbors
-            |> sortGroups neighbors
-            |> List.map
-                (List.map
-                    (\name ->
-                        ( name
-                        , Dict.get name bindings
-                            |> Maybe.withDefault (Name "error")
-                        )
+    stronglyConnected nodes neighbors
+        |> sortGroups neighbors
+        |> List.map
+            (List.map
+                (\name ->
+                    ( name
+                    , Dict.get name bindings
+                        |> Maybe.withDefault ( Name "error", { id = -1, column = -1, line = -1 } )
                     )
                 )
+            )
 
 
 sortGroups : Dict comparable (Set comparable) -> List (List comparable) -> List (List comparable)
@@ -52,7 +52,7 @@ sortGroups neighborDict groups =
                 -- this should be impossible, as the groups do not overlap
                 |> Maybe.withDefault []
     in
-        depsFirst groups groupNeighbors
+    depsFirst groups groupNeighbors
 
 
 {-| Returns the nodes of a directed acyclic graph (a tree) in an order where
@@ -68,12 +68,12 @@ depsFirst nodes neighbors =
             )
                 ++ [ node ]
     in
-        List.concatMap dependencies nodes
-            |> unique
+    List.concatMap dependencies nodes
+        |> unique
 
 
-freeVariables : Expression -> Set String
-freeVariables e =
+freeVariables : MExp -> Set String
+freeVariables ( e, _ ) =
     case e of
         Name x ->
             Set.singleton x
@@ -113,15 +113,16 @@ stronglyConnected nodes neighbors =
                             new =
                                 component node
                         in
-                            ( new :: components, Set.union new used )
+                        ( new :: components, Set.union new used )
+
                     else
                         ( components, used )
                 )
                 ( [], Set.empty )
                 nodes
     in
-        components
-            |> List.map Set.toList
+    components
+        |> List.map Set.toList
 
 
 connected : comparable -> Dict comparable (Set comparable) -> Set comparable
@@ -130,12 +131,13 @@ connected node neighbors =
         connected_ node visited =
             if Set.member node visited then
                 visited
+
             else
                 Dict.get node neighbors
                     |> Maybe.withDefault Set.empty
                     |> Set.foldl connected_ (Set.insert node visited)
     in
-        connected_ node Set.empty
+    connected_ node Set.empty
 
 
 reverseDict : Dict comparable (Set comparable) -> Dict comparable (Set comparable)
@@ -144,6 +146,6 @@ reverseDict dict =
         addEntry ( k, v ) =
             Dict.update k (Maybe.withDefault Set.empty >> Set.insert v >> Just)
     in
-        Dict.toList dict
-            |> List.concatMap (\( k, vs ) -> List.map (\v -> ( v, k )) <| Set.toList vs)
-            |> List.foldl addEntry Dict.empty
+    Dict.toList dict
+        |> List.concatMap (\( k, vs ) -> List.map (\v -> ( v, k )) <| Set.toList vs)
+        |> List.foldl addEntry Dict.empty

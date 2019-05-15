@@ -1,28 +1,13 @@
-module Infer.Type
-    exposing
-        ( ($)
-        , (=>)
-        , Constraint(..)
-        , RawType(..)
-        , Substitution
-        , Type
-        , bool
-        , char
-        , float
-        , int
-        , list
-        , string
-        , substitute
-        , toString
-        , unconstrained
-        , unify
-        , variables
-        )
+module Infer.Type exposing
+    ( Type, RawType(..), (=>), Constraint(..), unconstrained
+    , string, char, bool, int, float, list
+    , toString
+    , Substitution, substitute, ($)
+    , unify
+    , variables
+    )
 
-{-|
-
-
-#
+{-| #
 
 @docs Type, RawType, (=>), Constraint, unconstrained
 
@@ -72,6 +57,8 @@ type RawType
 (=>) : RawType -> RawType -> RawType
 (=>) =
     TArrow
+
+
 infixr 9 =>
 
 
@@ -114,10 +101,13 @@ unifyConstraints a b =
     in
     if a == b then
         Ok a
+
     else if unordered Number Comparable then
         Ok Number
+
     else if unordered Appendable Comparable then
         Ok CompAppend
+
     else
         Err "failed to unify constraints"
 
@@ -321,6 +311,7 @@ unify ( acs, at ) ( bcs, bt ) =
                         unifyMany
                             (List.map ((,) acs) at)
                             (List.map ((,) bcs) bt)
+
                     else
                         mismatch a b
 
@@ -335,6 +326,7 @@ unify ( acs, at ) ( bcs, bt ) =
                 ( TAny id, TAny id2 ) ->
                     if id == id2 then
                         Ok Dict.empty
+
                     else
                         (case ( Dict.get id acs, Dict.get id2 bcs ) of
                             ( Just a, Just b ) ->
@@ -374,8 +366,10 @@ unify ( acs, at ) ( bcs, bt ) =
                     |> Maybe.withDefault False
             then
                 Err "mismatched constraints"
+
             else if Set.member id (variables x) then
                 Err ("recursive type " ++ Basics.toString id ++ " " ++ toString_ x)
+
             else
                 -- TODO: drop unnecessary constraints here
                 Ok <| Dict.singleton id ( constraints, x )
@@ -393,6 +387,7 @@ unifyMany : List Type -> List Type -> Result String Substitution
 unifyMany context content =
     if List.length context /= List.length content then
         Err "different amounts of arguments"
+
     else
         List.map2 (,) context content
             |> List.foldl
@@ -416,6 +411,8 @@ mismatch a b =
 ($) : Substitution -> Substitution -> Substitution
 ($) a b =
     Dict.union (Dict.map (always <| substitute a) b) a
+
+
 infixl 9 $
 
 
