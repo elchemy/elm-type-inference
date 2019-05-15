@@ -100,6 +100,7 @@ generateConstraints environment ( exp, _ ) =
                 |> andThen
                     (\env -> generateConstraints env body)
 
+
         Spy exp tag ->
             generateConstraints environment exp
                 |> map

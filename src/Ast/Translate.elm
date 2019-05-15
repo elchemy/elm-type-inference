@@ -39,7 +39,7 @@ expression_ ( e, meta ) =
                     (\( x, m ) acc ->
                         ( InferExp.Call
                             ( InferExp.Call
-                                ( InferExp.Name "(::)", m )
+                                ( InferExp.Name "::", m )
                                 (expression_ ( x, m ))
                             , m
                             )
@@ -62,11 +62,44 @@ expression_ ( e, meta ) =
             expression_
                 ( EApplication
                     ( EApplication
-                        ( EVariable [ "(" ++ opName ++ ")" ], opMeta )
+                        ( EVariable [ opName ], opMeta )
                         l
                     , opMeta
                     )
                     r
+                , meta
+                )
+
+        EIf ( c, cm ) ( t, tm ) ( e, em ) ->
+            ( InferExp.Call
+                ( InferExp.Call
+                    ( InferExp.Call
+                        ( InferExp.Name "if", cm )
+                        (expression_ ( c, cm ))
+                    , tm
+                    )
+                    (expression_ ( t, tm ))
+                , em
+                )
+                (expression_ ( e, em ))
+            , meta
+            )
+
+        ECase ( c, cm ) li ->
+            let
+                ( lefts, rights ) =
+                    List.unzip li
+            in
+            expression_
+                ( EApplication
+                    ( EApplication
+                        ( EApplication ( EVariable [ "case" ], meta ) ( c, cm )
+                        , meta
+                        )
+                        ( EList lefts, meta )
+                    , meta
+                    )
+                    ( EList rights, meta )
                 , meta
                 )
 
