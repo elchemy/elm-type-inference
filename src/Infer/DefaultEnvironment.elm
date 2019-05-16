@@ -15,6 +15,7 @@ defaultEnvironment =
           )
         , ( "++"
           , ( []
+            -- TODO: should be appendable but does not work
             , unconstrained <| Type.string => Type.string => Type.string
             )
           )
