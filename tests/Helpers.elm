@@ -1,6 +1,7 @@
-module Helpers exposing (..)
+module Helpers exposing (ExpressionSansMeta(..), checkLetCase, checkRecordsIds, dropMeta, expressionHasUniqueIds, expressionHasUniqueIds_, fakeMeta, hasUniqueId_, listHasUniqueIds, listHasUniqueIds_, patternHasUniqueIds_, statementHasUniqueIds, statementHasUniqueIds_, statementsHaveUniqueIds)
 
-import Ast.Statement exposing (Statement, StatementBase(..))
+import Ast.Common exposing (WithMeta)
+import Ast.Identifiers exposing (..)
 import Infer.Expression exposing (..)
 import Infer.Type exposing (Type)
 import Set exposing (Set)
@@ -65,137 +66,102 @@ fakeMeta e =
             addMeta <| Spy (fakeMeta exp) i
 
 
-checkListUniqueIds : List AstMExp -> Set Id -> Maybe (Set Id)
-checkListUniqueIds li ids =
-    List.foldl (\x acc -> Maybe.andThen (hasUniqueIds_ x) acc) (Just ids) li
-
-
-checkNameId : MName -> Set Id -> Maybe (Set Id)
-checkNameId ( _, { id } ) ids =
-    if Set.member id ids then
-        Nothing
-
-    else
-        Just <| Set.insert id ids
-
-
-checkNameListUniqueIds : List MName -> Set Id -> Maybe (Set Id)
-checkNameListUniqueIds li ids =
-    case li of
-        [] ->
-            Just ids
-
-        n :: xs ->
-            checkNameId n ids |> Maybe.andThen (checkNameListUniqueIds xs)
-
-
-checkListAndExp : List AstMExp -> AstMExp -> Set Id -> Maybe (Set Id)
-checkListAndExp li ex ids =
-    hasUniqueIds_ ex ids |> Maybe.andThen (checkListUniqueIds li)
-
-
 checkRecordsIds : List ( MName, AstMExp ) -> Set Id -> Maybe (Set Id)
 checkRecordsIds records ids =
     List.unzip records
         |> (\( names, exps ) ->
-                checkNameListUniqueIds names ids
+                listHasUniqueIds_ hasUniqueId_ names ids
                     |> Maybe.andThen
-                        (checkListUniqueIds exps)
+                        (listHasUniqueIds_ expressionHasUniqueIds_ exps)
            )
 
 
-checkLetCase : List ( AstMExp, AstMExp ) -> AstMExp -> Set Id -> Maybe (Set Id)
+checkLetCase : List ( MPattern, AstMExp ) -> AstMExp -> Set Id -> Maybe (Set Id)
 checkLetCase li exp ids =
     let
-        ( li1, li2 ) =
+        ( patterns, exps ) =
             List.unzip li
     in
-    checkListUniqueIds li1 ids |> Maybe.andThen (checkListAndExp li2 exp)
+    expressionHasUniqueIds_ exp ids
+        |> Maybe.andThen (listHasUniqueIds_ patternHasUniqueIds_ patterns)
+        |> Maybe.andThen (listHasUniqueIds_ expressionHasUniqueIds_ exps)
 
 
-hasUniqueIds_ : AstMExp -> Set Id -> Maybe (Set Id)
-hasUniqueIds_ ( e, { id } ) ids =
-    if Set.member id ids then
-        Nothing
+expressionHasUniqueIds_ : AstMExp -> Set Id -> Maybe (Set Id)
+expressionHasUniqueIds_ (( e, { id } ) as whole) ids =
+    hasUniqueId_ whole ids
+        |> (Maybe.andThen <|
+                \newIds ->
+                    case e of
+                        EList li ->
+                            listHasUniqueIds_ expressionHasUniqueIds_ li ids
 
-    else
-        case e of
-            ECharacter _ ->
-                Just (Set.insert id ids)
+                        ETuple li ->
+                            listHasUniqueIds_ expressionHasUniqueIds_ li ids
 
-            EString _ ->
-                Just (Set.insert id ids)
+                        EAccess exp li ->
+                            expressionHasUniqueIds_ exp ids |> Maybe.andThen (listHasUniqueIds_ hasUniqueId_ li)
 
-            EInteger _ ->
-                Just (Set.insert id ids)
+                        ERecord records ->
+                            checkRecordsIds records ids
 
-            EFloat _ ->
-                Just (Set.insert id ids)
+                        ERecordUpdate n records ->
+                            hasUniqueId_ n ids
+                                |> Maybe.andThen (checkRecordsIds records)
 
-            EVariable _ ->
-                Just (Set.insert id ids)
+                        EIf e1 e2 e3 ->
+                            expressionHasUniqueIds_ e1 ids
+                                |> Maybe.andThen (expressionHasUniqueIds_ e2)
+                                |> Maybe.andThen (expressionHasUniqueIds_ e3)
 
-            EList li ->
-                checkListUniqueIds li ids
+                        ELet li exp ->
+                            checkLetCase li exp ids
 
-            ETuple li ->
-                checkListUniqueIds li ids
+                        ECase exp li ->
+                            checkLetCase li exp ids
 
-            EAccess exp li ->
-                hasUniqueIds_ exp ids |> Maybe.andThen (checkNameListUniqueIds li)
+                        ELambda li exp ->
+                            expressionHasUniqueIds_ exp ids |> Maybe.andThen (listHasUniqueIds_ patternHasUniqueIds_ li)
 
-            EAccessFunction _ ->
-                Just (Set.insert id ids)
+                        EApplication e1 e2 ->
+                            expressionHasUniqueIds_ e1 ids
+                                |> Maybe.andThen (expressionHasUniqueIds_ e2)
 
-            ERecord records ->
-                checkRecordsIds records ids
+                        EBinOp e1 e2 e3 ->
+                            expressionHasUniqueIds_ e1 ids
+                                |> Maybe.andThen (expressionHasUniqueIds_ e2)
+                                |> Maybe.andThen (expressionHasUniqueIds_ e3)
 
-            ERecordUpdate n records ->
-                checkNameId n ids
-                    |> Maybe.andThen (checkRecordsIds records)
+                        EExternal _ exp ->
+                            expressionHasUniqueIds_ exp ids
 
-            EIf e1 e2 e3 ->
-                hasUniqueIds_ e1 ids
-                    |> Maybe.andThen (hasUniqueIds_ e2)
-                    |> Maybe.andThen (hasUniqueIds_ e3)
-
-            ELet li exp ->
-                checkLetCase li exp ids
-
-            ECase exp li ->
-                checkLetCase li exp ids
-
-            ELambda li exp ->
-                hasUniqueIds_ exp ids |> Maybe.andThen (checkListUniqueIds li)
-
-            EApplication e1 e2 ->
-                hasUniqueIds_ e1 ids
-                    |> Maybe.andThen (hasUniqueIds_ e2)
-
-            EBinOp e1 e2 e3 ->
-                hasUniqueIds_ e1 ids
-                    |> Maybe.andThen (hasUniqueIds_ e2)
-                    |> Maybe.andThen (hasUniqueIds_ e3)
+                        _ ->
+                            Just newIds
+           )
 
 
-listHasUniqueIds_ : List AstMExp -> Set Id -> Maybe (Set Id)
-listHasUniqueIds_ list ids =
+listHasUniqueIds_ :
+    (WithMeta a Identifier -> Set Id -> Maybe (Set Id))
+    -> List (WithMeta a Identifier)
+    -> Set Id
+    -> Maybe (Set Id)
+listHasUniqueIds_ checker list ids =
     case list of
         [] ->
             Just ids
 
         exp :: rest ->
-            case hasUniqueIds_ exp ids of
+            case checker exp ids of
                 Nothing ->
                     Nothing
 
                 Just newIds ->
-                    listHasUniqueIds_ rest newIds
+                    listHasUniqueIds_ checker rest newIds
 
 
-listHasUniqueIds : List AstMExp -> Bool
-listHasUniqueIds l =
-    case listHasUniqueIds_ l Set.empty of
+listHasUniqueIds : (WithMeta a Identifier -> Set Id -> Maybe (Set Id)) -> List (WithMeta a Identifier) -> Bool
+listHasUniqueIds checker l =
+    case listHasUniqueIds_ checker l Set.empty of
         Nothing ->
             False
 
@@ -203,9 +169,9 @@ listHasUniqueIds l =
             True
 
 
-hasUniqueIds : AstMExp -> Bool
-hasUniqueIds exp =
-    case hasUniqueIds_ exp Set.empty of
+expressionHasUniqueIds : AstMExp -> Bool
+expressionHasUniqueIds exp =
+    case expressionHasUniqueIds_ exp Set.empty of
         Nothing ->
             False
 
@@ -213,42 +179,75 @@ hasUniqueIds exp =
             True
 
 
-generateStatementIds : Statement -> List AstMExp
-generateStatementIds ( s, _ ) =
-    case s of
-        FunctionDeclaration _ vars body ->
-            generateListIds (body :: vars)
+hasUniqueId_ : WithMeta a Identifier -> Set Id -> Maybe (Set Id)
+hasUniqueId_ ( _, { id } ) ids =
+    if Set.member id ids then
+        Nothing
 
-        _ ->
-            []
-
-
-generateStatementsIds : List Statement -> List AstMExp
-generateStatementsIds statements =
-    List.foldr
-        (\( x, _ ) acc ->
-            case x of
-                FunctionDeclaration _ vars body ->
-                    body :: vars ++ acc
-
-                _ ->
-                    acc
-        )
-        []
-        statements
-        |> generateListIds
+    else
+        Just (Set.insert id ids)
 
 
-statementHasUniqueIds : Statement -> Bool
-statementHasUniqueIds ( s, _ ) =
-    case s of
-        FunctionDeclaration _ vars body ->
-            listHasUniqueIds (generateListIds (body :: vars))
+patternHasUniqueIds_ : MPattern -> Set Id -> Maybe (Set Id)
+patternHasUniqueIds_ (( p, { id } ) as whole) ids =
+    hasUniqueId_ whole ids
+        |> (Maybe.andThen <|
+                \newIds ->
+                    case p of
+                        APTuple li ->
+                            listHasUniqueIds_ patternHasUniqueIds_ li newIds
+
+                        APCons head tail ->
+                            patternHasUniqueIds_ head newIds
+
+                        APList li ->
+                            listHasUniqueIds_ patternHasUniqueIds_ li newIds
+
+                        APRecord names ->
+                            listHasUniqueIds_ hasUniqueId_ names newIds
+
+                        APAs pattern _ ->
+                            patternHasUniqueIds_ pattern newIds
+
+                        APApplication left right ->
+                            patternHasUniqueIds_ left newIds |> Maybe.andThen (patternHasUniqueIds_ right)
+
+                        _ ->
+                            Just <| Set.insert id ids
+           )
+
+
+statementHasUniqueIds_ :
+    ( AstStatement, Ast.Common.Located Identifier )
+    -> Set Id
+    -> Maybe (Set Id)
+statementHasUniqueIds_ (( s, { id } ) as whole) ids =
+    hasUniqueId_ whole ids
+        |> (Maybe.andThen <|
+                \newIds ->
+                    case s of
+                        SPortDeclaration _ _ exp ->
+                            expressionHasUniqueIds_ exp newIds
+
+                        SFunctionDeclaration pattern exp ->
+                            patternHasUniqueIds_ pattern newIds
+                                |> Maybe.andThen (expressionHasUniqueIds_ exp)
+
+                        _ ->
+                            Just newIds
+           )
+
+
+statementHasUniqueIds : MStatement -> Bool
+statementHasUniqueIds s =
+    case statementHasUniqueIds_ s Set.empty of
+        Nothing ->
+            False
 
         _ ->
             True
 
 
-statementsHaveUniqueIds : List Statement -> Bool
+statementsHaveUniqueIds : List MStatement -> Bool
 statementsHaveUniqueIds =
-    generateStatementsIds >> listHasUniqueIds
+    listHasUniqueIds statementHasUniqueIds_

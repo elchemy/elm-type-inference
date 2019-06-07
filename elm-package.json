@@ -18,11 +18,14 @@
         "elm-lang/core": "5.1.1 <= v < 6.0.0",
         "elm-lang/html": "2.0.0 <= v < 3.0.0",
         "folkertdev/elm-state": "3.0.0 <= v < 4.0.0",
-        "Bogdanp/elm-ast": "9.0.1 <= v < 10.0.0"
+        "Bogdanp/elm-ast": "10.0.1 <= v < 11.0.0"
 
     },
     "dependency-sources": {
-        "Bogdanp/elm-ast": "https://github.com/Bogdanp/elm-ast.git"
+        "Bogdanp/elm-ast": {
+            "url": "https://github.com/MajronMan/elm-ast.git",
+            "ref": "pattern_match"
+        }
     },
     "elm-version": "0.18.0 <= v < 0.19.0"
 }
