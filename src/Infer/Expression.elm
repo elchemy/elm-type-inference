@@ -1,5 +1,5 @@
 module Infer.Expression exposing
-    ( Expression(..), MExp
+    ( Expression(..), MExp, Pattern(..), MPattern
     )
 
 {-| #
@@ -7,7 +7,7 @@ module Infer.Expression exposing
 
 # Types
 
-@docs Expression, MExp
+@docs Expression, MExp, Pattern, MPattern
 
 -}
 
@@ -21,14 +21,33 @@ The Spy variant has no effect on type inference, but can be used to find the typ
 -}
 type Expression
     = Literal Type
-    | Lambda String MExp
+    | Lambda MPattern MExp
     | Call MExp MExp
-    | Let (List ( String, MExp )) MExp
-    | Name String
+    | Let (List ( MPattern, MExp )) MExp
+    | Case MExp (List (MPattern, MExp))
+    | Name Name
     | Spy MExp Int
 
 
-{-| Expression enhanced with metadata containing id, line and column
+{-| Expression enhanced with metadata containing id, line and column in a form of (e, meta)
 -}
 type alias MExp =
     WithMeta Expression Identifier
+
+{-| Pattern matching -}
+type Pattern
+    = PWild
+    | PName Name
+    | PLiteral Type
+    | PTuple (List MPattern)
+    | PCons MPattern MPattern
+    | PList (List MPattern)
+    | PRecord (List Name)
+    | PAs MPattern Name
+    | PApplication MPattern MPattern
+
+
+{-| Pattern enhanced with metadata containing id, line and column in a form of (e, meta)
+-}
+type alias MPattern =
+    WithMeta Pattern Identifier

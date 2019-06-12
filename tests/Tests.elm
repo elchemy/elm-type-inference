@@ -10,44 +10,6 @@ import Infer.Type as Type exposing ((=>), Constraint(..), RawType(..), Type, unc
 import Test exposing (..)
 
 
-typeOf :  Environment -> ExpressionSansMeta -> Result String Type
-typeOf env exp =
-    Infer.typeOf env (fakeMeta exp)
-        |> Infer.finalValue 0
-        |> Result.map Tuple.first
-
-
-equal : a -> a -> () -> Expect.Expectation
-equal a b =
-    \() -> Expect.equal a b
-
-
-variablesDiffer a b =
-    \() ->
-        Expect.true "parts other than type variables differ"
-            (Type.unify a b
-                |> Result.map (Dict.values >> List.all (Tuple.second >> isTAny))
-                |> Result.withDefault False
-            )
-
-
-isTAny x =
-    case x of
-        TAny _ ->
-            True
-
-        _ ->
-            False
-
-
-stringLiteral =
-    LiteralSM <| unconstrained Type.string
-
-
-intLiteral =
-    LiteralSM <| unconstrained Type.int
-
-
 typeInference : Test
 typeInference =
     describe "Type inference"
@@ -85,7 +47,7 @@ typeInference =
                 (typeOf
                     Dict.empty
                     (LetSM
-                        [ ( "x", stringLiteral ) ]
+                        [ ( PNameSM "x", stringLiteral ) ]
                         (NameSM "x")
                     )
                 )
@@ -96,8 +58,8 @@ typeInference =
                 (typeOf
                     testEnv
                     (LetSM
-                        [ ( "f"
-                          , LambdaSM "x" <|
+                        [ ( PNameSM "f"
+                          , LambdaSM (PNameSM "x") <|
                                 if_ (LiteralSM <| unconstrained Type.bool)
                                     (CallSM (NameSM "f") (CallSM (CallSM (NameSM "+") (NameSM "x")) (NameSM "x")))
                                     stringLiteral
@@ -112,13 +74,13 @@ typeInference =
                 (typeOf
                     testEnv
                     (LetSM
-                        [ ( "f"
-                          , LambdaSM "x" <|
+                        [ ( PNameSM "f"
+                          , LambdaSM (PNameSM "x") <|
                                 if_ (LiteralSM <| unconstrained Type.bool)
                                     (CallSM (NameSM "g") (CallSM (CallSM (NameSM "+") (NameSM "x")) (NameSM "x")))
                                     stringLiteral
                           )
-                        , ( "g"
+                        , ( PNameSM "g"
                           , NameSM "f"
                           )
                         ]
@@ -131,7 +93,7 @@ typeInference =
                 (typeOf
                     testEnv
                     (LetSM
-                        [ ( "id", LambdaSM "x" <| NameSM "x" )
+                        [ ( PNameSM "id", LambdaSM (PNameSM "x") <| NameSM "x" )
                         ]
                         (tuple
                             (CallSM (NameSM "id") intLiteral)
@@ -145,9 +107,9 @@ typeInference =
                 (typeOf
                     testEnv
                     (LetSM
-                        [ ( "id", LambdaSM "x" <| NameSM "x" )
-                        , ( "a", CallSM (NameSM "id") intLiteral )
-                        , ( "b", CallSM (NameSM "id") stringLiteral )
+                        [ ( PNameSM "id", LambdaSM (PNameSM "x") <| NameSM "x" )
+                        , ( PNameSM "a", CallSM (NameSM "id") intLiteral )
+                        , ( PNameSM "b", CallSM (NameSM "id") stringLiteral )
                         ]
                         (tuple (NameSM "a") (NameSM "b"))
                     )
@@ -159,7 +121,7 @@ typeInference =
                     (Dict.singleton "Just"
                         ( [ 1 ], unconstrained <| TAny 1 => TOpaque "Maybe" [ TAny 1 ] )
                     )
-                    (fakeMeta <| LetSM [ ( "x", SpySM (NameSM "Just") 900 ) ] (NameSM "x"))
+                    (fakeMeta <| LetSM [ ( PNameSM "x", SpySM (NameSM "Just") 900 ) ] (NameSM "x"))
                     |> Infer.finalValue 0
                     |> Result.map Tuple.second
                     |> Result.toMaybe
@@ -171,9 +133,9 @@ typeInference =
             equal
                 (typeOf
                     (Dict.singleton "+"
-                        ( [ 1 ], ( Dict.singleton 1 Number, TAny 1 => TAny 1 => TAny 1 ) )
+                        ( [ 3 ], ( Dict.singleton 3 Number, TAny 3 => TAny 3 => TAny 3 ) )
                     )
-                    (LambdaSM "x" <| CallSM (CallSM (NameSM "+") (NameSM "x")) (NameSM "x"))
+                    (LambdaSM (PNameSM "x") <| CallSM (CallSM (NameSM "+") (NameSM "x")) (NameSM "x"))
                 )
                 (Ok ( Dict.singleton 1 Number, TAny 1 => TAny 1 ))
         ]
@@ -224,9 +186,10 @@ regressions =
                         LiteralSM << unconstrained << TAny
 
                     exp =
-                        fakeMeta <| CallSM
-                            (CallSM (NameSM "<") (CallSM (CallSM (NameSM "++") (SpySM (empty 1) 2)) (empty 3)))
-                            (SpySM (empty 4) 5)
+                        fakeMeta <|
+                            CallSM
+                                (CallSM (NameSM "<") (CallSM (CallSM (NameSM "++") (SpySM (empty 1) 2)) (empty 3)))
+                                (SpySM (empty 4) 5)
                 in
                 Infer.typeOf env exp
                     |> Infer.finalValue 100
@@ -236,31 +199,3 @@ regressions =
                         )
                     |> Result.withDefault (Expect.fail "did not type")
         ]
-
-
-if_ a b c =
-    CallSM (CallSM (CallSM (NameSM "if") a) b) c
-
-
-testEnv =
-    Dict.fromList
-        [ ( "if"
-          , ( [ 1 ]
-            , unconstrained <| Type.bool => TAny 1 => TAny 1 => TAny 1
-            )
-          )
-        , ( "+", arith )
-        , ( "tuple2"
-          , ( [ 1, 2 ]
-            , unconstrained <| TAny 1 => TAny 2 => TOpaque "Tuple" [ TAny 1, TAny 2 ]
-            )
-          )
-        ]
-
-
-tuple a b =
-    CallSM (CallSM (NameSM "tuple2") a) b
-
-
-arith =
-    ( [ 1 ], unconstrained <| TAny 1 => TAny 1 => TAny 1 )

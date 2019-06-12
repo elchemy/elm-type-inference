@@ -1,9 +1,10 @@
 module Meta exposing (idGeneration)
 
+import Ast
+import Ast.Identifiers exposing (generateStatementsIds)
 import Expect exposing (..)
 import Helpers exposing (..)
 import Test exposing (Test, describe, test)
-import Ast
 
 
 idGeneration : Test
@@ -44,9 +45,14 @@ in
         testGeneratedIds =
             \i () ->
                 case Ast.parse i of
-                    Ok (_, _, s) ->
-                        if statementsHaveUniqueIds s then
+                    Ok ( _, _, s ) ->
+                        let
+                            statements =
+                                generateStatementsIds s
+                        in
+                        if statementsHaveUniqueIds statements then
                             Expect.pass
+
                         else
                             Expect.fail "Ids are not unique"
 

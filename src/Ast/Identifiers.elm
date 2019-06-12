@@ -381,6 +381,8 @@ generateExpressionIds =
     Tuple.second << generateExpressionIds_ 0
 
 
+{-| Generate Ids for a statement which are unique in resulting structure
+-}
 generateStatementId : Id -> Statement -> ( Id, MStatement )
 generateStatementId newId ( statement, { line, column } ) =
     case statement of
@@ -432,7 +434,7 @@ generateStatementId newId ( statement, { line, column } ) =
             ( newId + 1, ( SComment s, { id = newId, line = line, column = column } ) )
 
 
-{-| Generate Ids for a single statement which are unique in resulting structure
+{-| Generate Ids for a list of statements which are unique in resulting structure
 -}
 generateStatementsIds : List Statement -> List MStatement
 generateStatementsIds =
