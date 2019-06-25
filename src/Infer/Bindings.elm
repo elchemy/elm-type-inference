@@ -9,7 +9,7 @@ import Set exposing (Set)
 import Utils exposing (..)
 
 
-{-| Create groups of mutually dependent free variables and sort those groups so that dependencies come first
+{-| Create groups of mutually dependent free variables and sort those groups so that dependencies come last
 -}
 group : List ( MPattern, MExp ) -> List (List ( MPattern, MExp ))
 group bindings_ =
@@ -57,13 +57,19 @@ group bindings_ =
 
         labels =
             List.concatMap Set.toList boundList
+
+        asd = Debug.log "labels" labels
+        gdj = Debug.log "neighbours" neighbours
     in
     case areUnique of
         Ok _ ->
             graphFromLabelsAndNeighbours labels neighbours
                 |> stronglyConnectedComponentsDAG
                 |> Graph.topologicalSort
-                |> List.map (.node >> .label >> findPatterns)
+                |> List.map (.node >> .label )
+                |> Debug.log "sorted"
+                |> List.map findPatterns
+                |> \a -> Debug.log "patterns" (List.map (List.map Tuple.first) a) |> \_ -> a
 
         Err s ->
             Debug.crash <| "Repeated use of variables: " ++ toString (Set.toList s)

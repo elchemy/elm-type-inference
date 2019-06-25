@@ -1,10 +1,14 @@
-module Helpers exposing (ExpressionSansMeta(..), PatternSansMeta(..), addFakeMeta, arith, checkLetCase, checkRecordsIds, dropMeta, dropPatternMeta, equal, expressionHasUniqueIds, expressionHasUniqueIds_, fakeMeta, fakePatternMeta, hasUniqueId_, if_, intLiteral, isTAny, listHasUniqueIds, listHasUniqueIds_, minimizeTAny, patternHasUniqueIds_, statementHasUniqueIds, statementHasUniqueIds_, statementsHaveUniqueIds, stringLiteral, testEnv, tuple, typeOf, variablesDiffer)
+module Helpers exposing (ExpressionSansMeta(..), PatternSansMeta(..), addFakeMeta, arith, checkLetCase, checkRecordsIds, code, codeWithContext, dropMeta, dropPatternMeta, equal, expressionHasUniqueIds, expressionHasUniqueIds_, fakeMeta, fakePatternMeta, hasUniqueId_, if_, intLiteral, isTAny, listEnv, listHasUniqueIds, listHasUniqueIds_, minimizeTAny, patternHasUniqueIds_, statementHasUniqueIds, statementHasUniqueIds_, statementsHaveUniqueIds, stringLiteral, testEnv, tuple, typeOf, variablesDiffer)
 
-import Ast.Common exposing (Name, WithMeta)
+import Ast
+import Ast.Common exposing (Name, Pattern(..), WithMeta)
 import Ast.Identifiers as Ast exposing (..)
+import Ast.Statement as Statement
+import Ast.Translate as Translate
 import Dict
 import Expect
 import Infer
+import Infer.DefaultEnvironment exposing (defaultEnvironment)
 import Infer.Expression as Infer exposing (..)
 import Infer.Monad as Infer
 import Infer.Scheme exposing (Environment, generalize, instantiate)
@@ -67,31 +71,31 @@ dropMeta ( e, _ ) =
 dropPatternMeta : Infer.MPattern -> PatternSansMeta
 dropPatternMeta ( pattern, _ ) =
     case pattern of
-        PWild ->
+        Infer.PWild ->
             PWildSM
 
-        PName n ->
+        Infer.PName n ->
             PNameSM n
 
-        PLiteral t ->
+        Infer.PLiteral t ->
             PLiteralSM t
 
-        PTuple li ->
+        Infer.PTuple li ->
             PTupleSM (List.map dropPatternMeta li)
 
-        PCons head tail ->
+        Infer.PCons head tail ->
             PConsSM (dropPatternMeta head) (dropPatternMeta tail)
 
-        PList li ->
+        Infer.PList li ->
             PListSM (List.map dropPatternMeta li)
 
-        PRecord names ->
+        Infer.PRecord names ->
             PRecordSM names
 
-        PAs p n ->
+        Infer.PAs p n ->
             PAsSM (dropPatternMeta p) n
 
-        PApplication left right ->
+        Infer.PApplication left right ->
             PApplicationSM (dropPatternMeta left) (dropPatternMeta right)
 
 
@@ -104,31 +108,31 @@ fakePatternMeta : PatternSansMeta -> Infer.MPattern
 fakePatternMeta p =
     case p of
         PWildSM ->
-            addFakeMeta PWild
+            addFakeMeta Infer.PWild
 
         PNameSM n ->
-            addFakeMeta <| PName n
+            addFakeMeta <| Infer.PName n
 
         PLiteralSM t ->
-            addFakeMeta <| PLiteral t
+            addFakeMeta <| Infer.PLiteral t
 
         PTupleSM li ->
-            addFakeMeta <| PTuple (List.map fakePatternMeta li)
+            addFakeMeta <| Infer.PTuple (List.map fakePatternMeta li)
 
         PConsSM head tail ->
-            addFakeMeta <| PCons (fakePatternMeta head) (fakePatternMeta tail)
+            addFakeMeta <| Infer.PCons (fakePatternMeta head) (fakePatternMeta tail)
 
         PListSM li ->
-            addFakeMeta <| PList (List.map fakePatternMeta li)
+            addFakeMeta <| Infer.PList (List.map fakePatternMeta li)
 
         PRecordSM names ->
-            addFakeMeta <| PRecord names
+            addFakeMeta <| Infer.PRecord names
 
         PAsSM p n ->
-            addFakeMeta <| PAs (fakePatternMeta p) n
+            addFakeMeta <| Infer.PAs (fakePatternMeta p) n
 
         PApplicationSM left right ->
-            addFakeMeta <| PApplication (fakePatternMeta left) (fakePatternMeta right)
+            addFakeMeta <| Infer.PApplication (fakePatternMeta left) (fakePatternMeta right)
 
 
 fakeMeta : ExpressionSansMeta -> MExp
@@ -353,13 +357,6 @@ statementsHaveUniqueIds =
     listHasUniqueIds statementHasUniqueIds_
 
 
-typeOf : Environment -> ExpressionSansMeta -> Result String Type
-typeOf env exp =
-    Infer.typeOf env (fakeMeta exp)
-        |> Infer.finalValue 0
-        |> Result.map Tuple.first
-
-
 equal : a -> a -> () -> Expect.Expectation
 equal a b =
     \() -> Expect.equal a b
@@ -491,3 +488,46 @@ minimizeTAny t =
                         el
             )
         |> listToArrow
+
+
+typeOf : Environment -> MExp -> Result String Type
+typeOf env exp =
+    Infer.typeOf env exp
+        |> Infer.finalValue 0
+        |> Result.map Tuple.first
+
+
+codeWithContext : Infer.Scheme.Environment -> String -> Result String RawType -> (() -> Expect.Expectation)
+codeWithContext env input typeOrError =
+    Ast.parse ("a = " ++ input)
+        |> Result.mapError (always "Parsing failed")
+        |> Result.andThen
+            (\res ->
+                case res of
+                    ( _, _, [ ( Statement.FunctionDeclaration ( PVariable "a", _ ) body, _ ) ] ) ->
+                        Ok body
+
+                    _ ->
+                        Err "Imparsable code"
+            )
+        |> Result.map Translate.expression
+        |> Result.andThen (typeOf env)
+        |> Result.map (Tuple.mapSecond minimizeTAny)
+        |> equal (Result.map unconstrained typeOrError)
+
+
+code : String -> Result String RawType -> (() -> Expect.Expectation)
+code =
+    codeWithContext defaultEnvironment
+
+
+listEnv : Environment
+listEnv =
+    Dict.union defaultEnvironment <|
+        Dict.fromList
+            [ ( "foldr"
+              , ( [ 0, 1 ]
+                , unconstrained <| (TAny 0 => TAny 1 => TAny 1) => TAny 1 => Type.list (TAny 0) => TAny 1
+                )
+              )
+            ]

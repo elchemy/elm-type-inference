@@ -31,7 +31,8 @@ getComponentNeighbours components component =
         |> List.unique
 
 
-{-| Create an acyclic graph of strongly connected components of given graph -}
+{-| Create an acyclic graph of strongly connected components of given graph
+-}
 stronglyConnectedComponentsDAG : Graph n e -> AcyclicGraph (List n) ()
 stronglyConnectedComponentsDAG g =
     let
@@ -53,6 +54,7 @@ stronglyConnectedComponentsDAG g =
                 Ok acyclic ->
                     Graph.mapNodes List.singleton g
                         |> Graph.mapEdges (always ())
+                        |> (\a -> Debug.log "graph" (Graph.toString a) |> (\_ -> a))
     in
     case Graph.checkAcyclic result of
         Ok acyclic ->

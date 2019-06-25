@@ -71,8 +71,21 @@ listConstraints generator env li =
                     (\( elemType, elemUnifications, elemEnv ) ->
                         ( elemType :: types, elemUnifications ++ unifications, elemEnv )
                     )
+
+        -- TU JEST OK
     in
-    List.foldr (andThen << generateElem) (pure ( [], [], env )) li
+    List.foldr
+        (\x acc ->
+            let
+                input = map (Debug.log "\nacc in") acc
+                computation = andThen (generateElem x) input
+                jezu = Debug.log "\n\nfinal" (finalValue 0 computation)
+                output = map (Debug.log "acc out") computation
+            in
+            jezu |> \_ -> output
+        )
+        (pure ( [], [], env ))
+        li
 
 
 generatePatternConstraints : Environment -> MPattern -> Monad ( Type, List Unification, Environment )
@@ -82,7 +95,10 @@ generatePatternConstraints env ( p, _ ) =
             map (\tv -> ( unconstrained tv, [], env )) freshTypevar
 
         PName n ->
-            map (\tv -> ( unconstrained tv, [], extend env n (unconstrained tv) )) freshTypevar
+            Debug.log "binding" n
+                |> (\_ ->
+                        map (\tv -> ( unconstrained tv, [], extend env n (unconstrained tv) )) freshTypevar
+                   )
 
         PLiteral t ->
             pure ( t, [], env )
@@ -181,24 +197,43 @@ generateBindingConstraints :
     -> ( MPattern, MExp )
     -> Monad ( Type, List Unification, Environment )
 generateBindingConstraints env ( pat, exp ) =
+    let
+        asd =
+            Debug.log "startEnv" ( Dict.get "a" env, Dict.get "b" env )
+    in
     generatePatternConstraints env pat
         |> andThen
             (\( patType, patUnifications, patEnv ) ->
-                generateConstraints patEnv exp
-                    |> map
-                        (\( expType, expUnifications, expEnv ) ->
-                            ( expType
-                            , ( expType, patType ) :: patUnifications ++ expUnifications
-                            , expEnv
-                            )
-                        )
+                Debug.log "patEnv" ( Dict.get "a" patEnv, Dict.get "b" patEnv )
+                    |> (\_ ->
+                            generateConstraints patEnv exp
+                                |> map
+                                    (\( expType, expUnifications, expEnv ) ->
+                                        let
+                                            adg =
+                                                Debug.log "expEnv" ( Dict.get "a" env, Dict.get "b" expEnv )
+                                        in
+                                        ( expType
+                                        , ( expType, patType ) :: patUnifications ++ expUnifications
+                                        , expEnv
+                                        )
+                                    )
+                       )
             )
 
 
 generateConstraints : Environment -> MExp -> Monad ( Type, List Unification, Environment )
 generateConstraints environment ( exp, _ ) =
+    let
+        asd =
+            Debug.log "genCons" ( Dict.get "a" environment, Dict.get "b" environment )
+    in
     case exp of
         Name name ->
+            let
+                ass =
+                    Debug.log "genName" name
+            in
             variable environment name
                 |> map (\x -> ( x, [], environment ))
 
