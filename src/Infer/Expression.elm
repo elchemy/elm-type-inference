@@ -37,7 +37,8 @@ type alias MExp =
 {-| Pattern matching -}
 type Pattern
     = PWild
-    | PName Name
+    | PVariable Name
+    | PConstructor Name
     | PLiteral Type
     | PTuple (List MPattern)
     | PCons MPattern MPattern

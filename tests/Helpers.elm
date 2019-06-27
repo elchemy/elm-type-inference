@@ -15,11 +15,13 @@ import Infer.Scheme exposing (Environment, generalize, instantiate)
 import Infer.Type as Type exposing ((=>), Constraint(..), RawType(..), Type, unconstrained)
 import List.Extra as List
 import Set exposing (Set)
+import State exposing (State)
 
 
 type PatternSansMeta
     = PWildSM
-    | PNameSM Name
+    | PConstructorSM Name
+    | PVariableSM Name
     | PLiteralSM Type
     | PTupleSM (List PatternSansMeta)
     | PConsSM PatternSansMeta PatternSansMeta
@@ -74,8 +76,11 @@ dropPatternMeta ( pattern, _ ) =
         Infer.PWild ->
             PWildSM
 
-        Infer.PName n ->
-            PNameSM n
+        Infer.PVariable n ->
+            PVariableSM n
+
+        Infer.PConstructor n ->
+            PConstructorSM n
 
         Infer.PLiteral t ->
             PLiteralSM t
@@ -99,75 +104,160 @@ dropPatternMeta ( pattern, _ ) =
             PApplicationSM (dropPatternMeta left) (dropPatternMeta right)
 
 
-addFakeMeta : a -> WithMeta a Identifier
-addFakeMeta x =
-    ( x, { id = -1, line = -1, column = -1 } )
+addFakeMeta : a -> Int -> WithMeta a Identifier
+addFakeMeta x id =
+    ( x, { id = id, line = -1, column = -1 } )
 
 
-fakePatternMeta : PatternSansMeta -> Infer.MPattern
+fakePatternMeta : PatternSansMeta -> State Int Infer.MPattern
 fakePatternMeta p =
     case p of
         PWildSM ->
-            addFakeMeta Infer.PWild
+            freshInt |> State.map (addFakeMeta Infer.PWild)
 
-        PNameSM n ->
-            addFakeMeta <| Infer.PName n
+        PVariableSM n ->
+            freshInt |> State.map (addFakeMeta <| Infer.PVariable n)
+
+        PConstructorSM n ->
+            freshInt |> State.map (addFakeMeta <| Infer.PConstructor n)
 
         PLiteralSM t ->
-            addFakeMeta <| Infer.PLiteral t
+            freshInt |> State.map (addFakeMeta <| Infer.PLiteral t)
 
         PTupleSM li ->
-            addFakeMeta <| Infer.PTuple (List.map fakePatternMeta li)
+            let
+                listMeta =
+                    List.map fakePatternMeta li |> State.combine
+            in
+            State.map2 (\fresh newList -> addFakeMeta (Infer.PTuple newList) fresh) freshInt listMeta
 
         PConsSM head tail ->
-            addFakeMeta <| Infer.PCons (fakePatternMeta head) (fakePatternMeta tail)
+            let
+                headMeta =
+                    fakePatternMeta head
+
+                tailMeta =
+                    fakePatternMeta tail
+            in
+            State.map3 (\fresh newHead newTail -> addFakeMeta (Infer.PCons newHead newTail) fresh) freshInt headMeta tailMeta
 
         PListSM li ->
-            addFakeMeta <| Infer.PList (List.map fakePatternMeta li)
+            let
+                listMeta =
+                    List.map fakePatternMeta li |> State.combine
+            in
+            State.map2 (\fresh newList -> addFakeMeta (Infer.PList newList) fresh) freshInt listMeta
 
         PRecordSM names ->
-            addFakeMeta <| Infer.PRecord names
+            freshInt |> State.map (addFakeMeta <| Infer.PRecord names)
 
         PAsSM p n ->
-            addFakeMeta <| Infer.PAs (fakePatternMeta p) n
+            let
+                patternMeta =
+                    fakePatternMeta p
+            in
+            State.map2 (\fresh pattern -> addFakeMeta (Infer.PAs pattern n) fresh) freshInt patternMeta
 
         PApplicationSM left right ->
-            addFakeMeta <| Infer.PApplication (fakePatternMeta left) (fakePatternMeta right)
+            let
+                leftMeta =
+                    fakePatternMeta left
+
+                rightMeta =
+                    fakePatternMeta right
+            in
+            State.map3 (\fresh newLeft newRight -> addFakeMeta (Infer.PApplication newLeft newRight) fresh) freshInt leftMeta rightMeta
+
+
+freshInt : State Int Int
+freshInt =
+    State.advance (\state -> ( state, state + 1 ))
 
 
 fakeMeta : ExpressionSansMeta -> MExp
-fakeMeta e =
-    let
-        addMeta x =
-            ( x, { id = -1, line = -1, column = -1 } )
-    in
+fakeMeta =
+    State.finalValue 0 << fakeMeta_
+
+
+fakeMeta_ : ExpressionSansMeta -> State Int MExp
+fakeMeta_ e =
     case e of
         LiteralSM t ->
-            addMeta <| Literal t
+            freshInt |> State.andThen (State.state << addFakeMeta (Literal t))
 
         LambdaSM s exp ->
-            addMeta <| Lambda (fakePatternMeta s) (fakeMeta exp)
+            let
+                expMeta =
+                    fakeMeta_ exp
+
+                patternMeta =
+                    fakePatternMeta s
+            in
+            State.map3
+                (\fresh pat newExp ->
+                    addFakeMeta (Lambda pat newExp) fresh
+                )
+                freshInt
+                patternMeta
+                expMeta
 
         CallSM e1 e2 ->
-            addMeta <| Call (fakeMeta e1) (fakeMeta e2)
+            let
+                e1Meta =
+                    fakeMeta_ e1
+
+                e2Meta =
+                    fakeMeta_ e2
+            in
+            State.map3
+                (\fresh newE1 newE2 ->
+                    addFakeMeta (Call newE1 newE2) fresh
+                )
+                freshInt
+                e1Meta
+                e2Meta
 
         LetSM list expression ->
-            addMeta <|
-                Let
-                    (List.map (\( s, exp ) -> ( fakePatternMeta s, fakeMeta exp )) list)
-                    (fakeMeta expression)
+            let
+                ( patterns, expressions ) =
+                    List.map (\( p, exp ) -> ( fakePatternMeta p, fakeMeta_ exp )) list
+                        |> List.unzip
+                        |> (\( pats, exps ) -> ( State.combine pats, State.combine exps ))
+
+                expMeta =
+                    fakeMeta_ expression
+            in
+            State.map3 (\pats exps exp -> addFakeMeta (Let (List.map2 (,) pats exps) exp))
+                patterns
+                expressions
+                expMeta
+                |> State.andMap freshInt
 
         CaseSM expression list ->
-            addMeta <|
-                Case
-                    (fakeMeta expression)
-                    (List.map (\( s, exp ) -> ( fakePatternMeta s, fakeMeta exp )) list)
+            let
+                ( patterns, expressions ) =
+                    List.map (\( p, exp ) -> ( fakePatternMeta p, fakeMeta_ exp )) list
+                        |> List.unzip
+                        |> (\( pats, exps ) -> ( State.combine pats, State.combine exps ))
+
+                expMeta =
+                    fakeMeta_ expression
+            in
+            State.map3 (\pats exps exp -> addFakeMeta (Case exp (List.map2 (,) pats exps)))
+                patterns
+                expressions
+                expMeta
+                |> State.andMap freshInt
 
         NameSM s ->
-            addMeta <| Name s
+            freshInt |> State.map (addFakeMeta <| Name s)
 
         SpySM exp i ->
-            addMeta <| Spy (fakeMeta exp) i
+            let
+                expMeta =
+                    fakeMeta_ exp
+            in
+            State.map2 (\fresh newExp -> addFakeMeta (Spy newExp i) fresh) freshInt expMeta
 
 
 checkRecordsIds : List ( MName, AstMExp ) -> Set Id -> Maybe (Set Id)
@@ -362,6 +452,24 @@ equal a b =
     \() -> Expect.equal a b
 
 
+typesEqual : Type -> Type -> () -> Expect.Expectation
+typesEqual ( constr1, t1 ) ( constr2, t2 ) =
+    let
+        usedTypeVars1 =
+            extractTypeVariableIds <| arrowToList t1
+
+        usedTypeVars2 =
+            extractTypeVariableIds <| arrowToList t2
+
+        newConstr1 =
+            Dict.filter (\k _ -> List.member k usedTypeVars1) constr1
+
+        newConstr2 =
+            Dict.filter (\k _ -> List.member k usedTypeVars2) constr2
+    in
+    \() -> Expect.equal ( newConstr1, t1 ) ( newConstr2, t2 )
+
+
 variablesDiffer : Type -> Type -> () -> Expect.Expectation
 variablesDiffer a b =
     \() ->
@@ -428,49 +536,60 @@ arith =
     ( [ 1 ], unconstrained <| TAny 1 => TAny 1 => TAny 1 )
 
 
-minimizeTAny : RawType -> RawType
-minimizeTAny t =
-    let
-        arrowToList a =
-            case a of
-                TArrow left right ->
-                    left :: arrowToList right
+arrowToList : RawType -> List RawType
+arrowToList a =
+    case a of
+        TArrow left right ->
+            left :: arrowToList right
+
+        _ ->
+            [ a ]
+
+
+listToArrow : List RawType -> RawType
+listToArrow l =
+    case l of
+        [] ->
+            Debug.crash "No empty lists"
+
+        x :: [] ->
+            x
+
+        x :: y :: [] ->
+            TArrow x y
+
+        x :: y :: z ->
+            TArrow x (listToArrow (y :: z))
+
+
+extractTypeVariableIds : List RawType -> List Int
+extractTypeVariableIds =
+    List.filterMap
+        (\el ->
+            case el of
+                TAny id ->
+                    Just id
 
                 _ ->
-                    [ a ]
+                    Nothing
+        )
 
-        listToArrow l =
-            case l of
-                [] ->
-                    Debug.crash "No empty lists"
 
-                x :: [] ->
-                    x
-
-                x :: y :: [] ->
-                    TArrow x y
-
-                x :: y :: z ->
-                    TArrow x (listToArrow (y :: z))
-
+minimizeTAny : Type -> Type
+minimizeTAny ( constr, t ) =
+    let
         typesList =
             arrowToList t
 
         minimizedIds =
-            List.filterMap
-                (\el ->
-                    case el of
-                        TAny id ->
-                            Just id
-
-                        _ ->
-                            Nothing
-                )
-                typesList
+            extractTypeVariableIds typesList
                 |> List.unique
                 |> List.sort
                 |> List.indexedMap (flip (,))
                 |> Dict.fromList
+
+        newConstr =
+            Dict.foldl (\k v acc -> Dict.insert (Dict.get k minimizedIds |> Maybe.withDefault -1) v acc) Dict.empty constr
     in
     typesList
         |> List.map
@@ -488,6 +607,7 @@ minimizeTAny t =
                         el
             )
         |> listToArrow
+        |> (,) newConstr
 
 
 typeOf : Environment -> MExp -> Result String Type
@@ -497,14 +617,14 @@ typeOf env exp =
         |> Result.map Tuple.first
 
 
-codeWithContext : Infer.Scheme.Environment -> String -> Result String RawType -> (() -> Expect.Expectation)
+codeWithContext : Infer.Scheme.Environment -> String -> Result String Type -> (() -> Expect.Expectation)
 codeWithContext env input typeOrError =
     Ast.parse ("a = " ++ input)
         |> Result.mapError (always "Parsing failed")
         |> Result.andThen
             (\res ->
                 case res of
-                    ( _, _, [ ( Statement.FunctionDeclaration ( PVariable "a", _ ) body, _ ) ] ) ->
+                    ( _, _, [ ( Statement.FunctionDeclaration ( Ast.Common.PVariable "a", _ ) body, _ ) ] ) ->
                         Ok body
 
                     _ ->
@@ -512,11 +632,18 @@ codeWithContext env input typeOrError =
             )
         |> Result.map Translate.expression
         |> Result.andThen (typeOf env)
-        |> Result.map (Tuple.mapSecond minimizeTAny)
-        |> equal (Result.map unconstrained typeOrError)
+        |> Result.map minimizeTAny
+        |> (\r ->
+                case ( r, typeOrError ) of
+                    ( Ok t1, Ok t2 ) ->
+                        typesEqual t1 t2
+
+                    _ ->
+                        equal r typeOrError
+           )
 
 
-code : String -> Result String RawType -> (() -> Expect.Expectation)
+code : String -> Result String Type -> (() -> Expect.Expectation)
 code =
     codeWithContext defaultEnvironment
 

@@ -1,6 +1,5 @@
-module Infer.Bindings exposing (group)
+module Infer.Bindings exposing (Binding, Variable(..), group)
 
-import Dict exposing (Dict)
 import Graph exposing (AcyclicGraph, Edge, Graph, Node)
 import Infer.Expression exposing (Expression(..), MExp, MPattern, Pattern(..))
 import List.Extra as List
@@ -9,67 +8,89 @@ import Set exposing (Set)
 import Utils exposing (..)
 
 
+type alias Binding =
+    ( MPattern, MExp )
+
+
+type Variable
+    = Value String Int
+    | Function String (List MPattern) Int
+
+
+getPatternId : MPattern -> Int
+getPatternId ( _, { id } ) =
+    id
+
+
+getVariablePatternId : Variable -> Int
+getVariablePatternId v =
+    case v of
+        Value _ id ->
+            id
+
+        Function _ _ id ->
+            id
+
+
 {-| Create groups of mutually dependent free variables and sort those groups so that dependencies come last
 -}
-group : List ( MPattern, MExp ) -> List (List ( MPattern, MExp ))
-group bindings_ =
+group : List Binding -> List (List ( MPattern, MExp ))
+group bindings =
     let
         ( patterns, expressions ) =
-            List.unzip bindings_
+            List.unzip bindings
 
         boundList =
             List.map boundVariables patterns
 
-        numberedMatches =
-            List.indexedMap (,) bindings_ |> Dict.fromList
+        boundNamesList =
+            boundList |> List.map (List.map variableName >> Set.fromList)
 
-        varsToMatchIds =
-            List.map2 (\vars pattern -> List.map (flip (,) pattern) <| Set.toList vars) boundList (Dict.keys numberedMatches)
-                |> List.concat
-                |> Dict.fromList
+        boundNames =
+            arbitraryUnion boundNamesList
 
         areUnique =
-            List.foldr (Result.andThen << disjointUnion) (Ok Set.empty) boundList
-
-        bindings =
-            List.map2 (\exp -> Set.foldr (\x acc -> ( x, exp ) :: acc) []) expressions boundList
-                |> List.concat
-                |> Dict.fromList
-
-        bound =
-            arbitraryUnion boundList
-
-        neighbours =
-            Dict.map
-                (\v exp ->
-                    freeVariables exp
-                        |> (\free ->
-                                Set.intersect free bound
-                           )
-                        |> Set.toList
-                )
-                bindings
-
-        findPatterns vars =
-            List.map (flip getOrCrash varsToMatchIds) vars
-                |> List.unique
-                |> List.map (flip getOrCrash numberedMatches)
+            List.foldr (Result.andThen << disjointUnion)
+                (Ok Set.empty)
+                boundNamesList
 
         labels =
-            List.concatMap Set.toList boundList
+            List.concat boundList
 
-        asd = Debug.log "labels" labels
-        gdj = Debug.log "neighbours" neighbours
+        nodes =
+            List.map (\(( ( _, { id } ), _ ) as binding) -> Node id binding) bindings
+
+        neighbourPatternIds exp =
+            let
+                freeVars =
+                    freeVariables exp
+            in
+            List.filterMap
+                (\label ->
+                    if not <| Set.member (variableName label) freeVars then
+                        Nothing
+
+                    else
+                        Just (getVariablePatternId label)
+                )
+                labels
+                |> List.unique
+
+        edges =
+            List.map
+                (\( ( _, { id } ), exp ) ->
+                    List.map (\neighbourId -> Edge id neighbourId ()) (neighbourPatternIds exp)
+                )
+                bindings
+                |> List.concat
+
     in
     case areUnique of
         Ok _ ->
-            graphFromLabelsAndNeighbours labels neighbours
+            Graph.fromNodesAndEdges nodes edges
                 |> stronglyConnectedComponentsDAG
                 |> Graph.topologicalSort
-                |> List.map (.node >> .label )
-                |> Debug.log "sorted"
-                |> List.map findPatterns
-                |> \a -> Debug.log "patterns" (List.map (List.map Tuple.first) a) |> \_ -> a
+                |> List.map (.node >> .label)
 
         Err s ->
             Debug.crash <| "Repeated use of variables: " ++ toString (Set.toList s)
@@ -77,40 +98,80 @@ group bindings_ =
 
 {-| Get a set of variables bound by a pattern
 -}
-boundVariables : MPattern -> Set String
-boundVariables ( p, _ ) =
+boundVariables : MPattern -> List Variable
+boundVariables (( p, { id } ) as pattern) =
     case p of
         PWild ->
-            Set.empty
+            []
 
-        PName n ->
-            Set.singleton n
+        PVariable n ->
+            [ Value n id ]
+
+        PConstructor n ->
+            []
 
         PLiteral _ ->
-            Set.empty
+            []
 
         PTuple elems ->
-            List.map boundVariables elems |> List.foldl Set.union Set.empty
+            List.map boundVariables elems |> List.concat
 
         PCons head tail ->
-            Set.union (boundVariables head) (boundVariables tail)
+            boundVariables head ++ boundVariables tail
 
         PList elems ->
-            List.map boundVariables elems |> List.foldl Set.union Set.empty
+            List.map boundVariables elems |> List.concat
 
         PRecord names ->
-            Set.fromList names
+            List.map (\n -> Value n id) names
 
         PAs body name ->
-            Set.union (boundVariables body) (Set.singleton name)
+            Value name id :: boundVariables body
 
         PApplication (( leftBody, _ ) as left) right ->
-            case leftBody of
-                PApplication _ _ ->
-                    Set.union (boundVariables left) (boundVariables right)
+            let
+                ( ( name, _ ), args ) =
+                    splitApplication pattern
+            in
+            case name of
+                PConstructor _ ->
+                    List.map boundVariables args |> List.concat
+
+                PVariable n ->
+                    [ Function n args id ]
 
                 _ ->
-                    boundVariables right
+                    Debug.crash "Can only use a constructor or a function name here"
+
+
+variableName : Variable -> String
+variableName v =
+    case v of
+        Value n _ ->
+            n
+
+        Function n _ _ ->
+            n
+
+
+compareVariables : Variable -> Variable -> Bool
+compareVariables a b =
+    variableName a == variableName b
+
+
+splitApplication : MPattern -> ( MPattern, List MPattern )
+splitApplication (( app, _ ) as whole) =
+    case app of
+        PApplication left right ->
+            Tuple.mapSecond (flip (++) [ right ]) (splitApplication left)
+
+        _ ->
+            ( whole, [] )
+
+
+boundVariablesNames : MPattern -> Set String
+boundVariablesNames =
+    Set.fromList << List.map variableName << boundVariables
 
 
 {-| Get a set of free variables occurring in an expression
@@ -122,11 +183,16 @@ freeVariables ( e, _ ) =
             Set.singleton x
 
         Lambda arg exp ->
-            Set.diff (freeVariables exp) (boundVariables arg)
+            let
+                argVars =
+                    boundVariables arg |> List.map variableName |> Set.fromList
+            in
+            Set.diff (freeVariables exp) argVars
 
         Let bindings exp ->
             List.unzip bindings
-                |> Tuple.mapFirst (arbitraryUnion << List.map boundVariables)
+                |> Tuple.mapFirst
+                    (arbitraryUnion << List.map boundVariablesNames)
                 |> Tuple.mapSecond
                     (Set.union (freeVariables exp)
                         << (arbitraryUnion << List.map freeVariables)
@@ -135,7 +201,7 @@ freeVariables ( e, _ ) =
 
         Case exp bindings ->
             List.unzip bindings
-                |> Tuple.mapFirst (arbitraryUnion << List.map boundVariables)
+                |> Tuple.mapFirst (arbitraryUnion << List.map boundVariablesNames)
                 |> Tuple.mapSecond
                     (Set.union (freeVariables exp)
                         << (arbitraryUnion << List.map freeVariables)

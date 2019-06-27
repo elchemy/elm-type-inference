@@ -62,7 +62,7 @@ freshTypevar =
         |> map TAny
 
 
-listConstraints : (Environment -> a -> Monad ( Type, List Unification, Environment )) -> Environment -> List a -> Monad ( List Type, List Unification, Environment )
+listConstraints : (Environment -> a -> Monad ( b, List Unification, Environment )) -> Environment -> List a -> Monad ( List b, List Unification, Environment )
 listConstraints generator env li =
     let
         generateElem elem ( types, unifications, newEnv ) =
@@ -71,21 +71,8 @@ listConstraints generator env li =
                     (\( elemType, elemUnifications, elemEnv ) ->
                         ( elemType :: types, elemUnifications ++ unifications, elemEnv )
                     )
-
-        -- TU JEST OK
     in
-    List.foldr
-        (\x acc ->
-            let
-                input = map (Debug.log "\nacc in") acc
-                computation = andThen (generateElem x) input
-                jezu = Debug.log "\n\nfinal" (finalValue 0 computation)
-                output = map (Debug.log "acc out") computation
-            in
-            jezu |> \_ -> output
-        )
-        (pure ( [], [], env ))
-        li
+    List.foldr (andThen << generateElem) (pure ( [], [], env )) li
 
 
 generatePatternConstraints : Environment -> MPattern -> Monad ( Type, List Unification, Environment )
@@ -94,11 +81,11 @@ generatePatternConstraints env ( p, _ ) =
         PWild ->
             map (\tv -> ( unconstrained tv, [], env )) freshTypevar
 
-        PName n ->
-            Debug.log "binding" n
-                |> (\_ ->
-                        map (\tv -> ( unconstrained tv, [], extend env n (unconstrained tv) )) freshTypevar
-                   )
+        PConstructor n ->
+            map (\tv -> ( unconstrained tv, [], extend env n (unconstrained tv) )) freshTypevar
+
+        PVariable n ->
+            map (\tv -> ( unconstrained tv, [], extend env n (unconstrained tv) )) freshTypevar
 
         PLiteral t ->
             pure ( t, [], env )
@@ -197,43 +184,57 @@ generateBindingConstraints :
     -> ( MPattern, MExp )
     -> Monad ( Type, List Unification, Environment )
 generateBindingConstraints env ( pat, exp ) =
-    let
-        asd =
-            Debug.log "startEnv" ( Dict.get "a" env, Dict.get "b" env )
-    in
     generatePatternConstraints env pat
         |> andThen
             (\( patType, patUnifications, patEnv ) ->
-                Debug.log "patEnv" ( Dict.get "a" patEnv, Dict.get "b" patEnv )
-                    |> (\_ ->
-                            generateConstraints patEnv exp
-                                |> map
-                                    (\( expType, expUnifications, expEnv ) ->
-                                        let
-                                            adg =
-                                                Debug.log "expEnv" ( Dict.get "a" env, Dict.get "b" expEnv )
-                                        in
-                                        ( expType
-                                        , ( expType, patType ) :: patUnifications ++ expUnifications
-                                        , expEnv
-                                        )
-                                    )
-                       )
+                generateConstraints patEnv exp
+                    |> map
+                        (\( expType, expUnifications, expEnv ) ->
+                            ( expType
+                            , ( expType, patType ) :: patUnifications ++ expUnifications
+                            , expEnv
+                            )
+                        )
+            )
+
+
+generateCircularConstraints : Environment -> List ( MPattern, MExp ) -> Monad ( List ( Type, Type ), List Unification, Environment )
+generateCircularConstraints environment li =
+    let
+        ( patterns, expressions ) =
+            List.unzip li
+
+        patternConstraints =
+            -- add all variables to environment
+            listConstraints generatePatternConstraints environment patterns
+
+        expressionConstraints =
+            patternConstraints
+                |> andThen
+                    (\( patternTypes, patternUnifications, patternEnv ) ->
+                        listConstraints generateConstraints patternEnv expressions
+                            |> map
+                                (\( expressionTypes, expressionUnifications, expressionEnv ) ->
+                                    -- match patterns with corresponding expression
+                                    ( List.map2 (,) patternTypes expressionTypes, patternUnifications ++ expressionUnifications, expressionEnv )
+                                )
+                    )
+    in
+    expressionConstraints
+        |> map
+            (\( pairs, unifications, newEnv ) ->
+                ( pairs
+                , -- enforce pattern is the same type as the  corresponding expression
+                  unifications ++ pairs
+                , newEnv
+                )
             )
 
 
 generateConstraints : Environment -> MExp -> Monad ( Type, List Unification, Environment )
 generateConstraints environment ( exp, _ ) =
-    let
-        asd =
-            Debug.log "genCons" ( Dict.get "a" environment, Dict.get "b" environment )
-    in
     case exp of
         Name name ->
-            let
-                ass =
-                    Debug.log "genName" name
-            in
             variable environment name
                 |> map (\x -> ( x, [], environment ))
 
@@ -305,21 +306,9 @@ generateConstraints environment ( exp, _ ) =
                     Bindings.group bindings
             in
             patternsOrder
-                |> List.foldr
-                    (\bindingGroup acc ->
-                        acc
-                            |> andThen
-                                (\( accUnifications, accEnv ) ->
-                                    listConstraints generateBindingConstraints environment bindingGroup
-                                        |> map
-                                            (\( _, bindingUnifications, newEnv ) ->
-                                                ( bindingUnifications ++ accUnifications, newEnv )
-                                            )
-                                )
-                    )
-                    (pure ( [], environment ))
+                |> listConstraints generateCircularConstraints environment
                 |> andThen
-                    (\( bindingsUnifications, bindingsEnv ) ->
+                    (\( _, bindingsUnifications, bindingsEnv ) ->
                         generateConstraints bindingsEnv body
                             |> map
                                 (\( bodyType, bodyUnifications, newEnv ) ->

@@ -14,10 +14,10 @@ pattern_ ( p, meta ) =
             ( InferExp.PWild, meta )
 
         APVariable n ->
-            ( InferExp.PName n, meta )
+            ( InferExp.PVariable n, meta )
 
         APConstructor n ->
-            ( InferExp.PName n, meta )
+            ( InferExp.PConstructor n, meta )
 
         APLiteral l ->
             case l of

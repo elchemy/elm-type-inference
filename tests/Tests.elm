@@ -15,13 +15,13 @@ typeInference =
     describe "Type inference"
         [ test "trivial inference" <|
             equal
-                (typeOf Dict.empty stringLiteral)
+                (typeOf Dict.empty (fakeMeta stringLiteral))
                 (Ok <| unconstrained Type.string)
         , test "identity construction" <|
             equal
                 (typeOf
                     (Dict.singleton "identity" ( [ 1 ], unconstrained <| TAny 1 => TAny 1 ))
-                    (CallSM (NameSM "identity")
+                    (fakeMeta <| CallSM (NameSM "identity")
                         (CallSM (NameSM "identity")
                             stringLiteral
                         )
@@ -33,7 +33,7 @@ typeInference =
             equal
                 (typeOf
                     (Dict.singleton "(++)" ( [ 1 ], unconstrained <| Type.string => Type.string => Type.string ))
-                    (CallSM
+                    (fakeMeta <| CallSM
                         (CallSM (NameSM "(++)")
                             stringLiteral
                         )
@@ -46,8 +46,8 @@ typeInference =
             equal
                 (typeOf
                     Dict.empty
-                    (LetSM
-                        [ ( PNameSM "x", stringLiteral ) ]
+                    (fakeMeta <| LetSM
+                        [ ( PVariableSM "x", stringLiteral ) ]
                         (NameSM "x")
                     )
                 )
@@ -57,9 +57,9 @@ typeInference =
             equal
                 (typeOf
                     testEnv
-                    (LetSM
-                        [ ( PNameSM "f"
-                          , LambdaSM (PNameSM "x") <|
+                    (fakeMeta <| LetSM
+                        [ ( PVariableSM "f"
+                          , LambdaSM (PVariableSM "x") <|
                                 if_ (LiteralSM <| unconstrained Type.bool)
                                     (CallSM (NameSM "f") (CallSM (CallSM (NameSM "+") (NameSM "x")) (NameSM "x")))
                                     stringLiteral
@@ -73,14 +73,14 @@ typeInference =
             equal
                 (typeOf
                     testEnv
-                    (LetSM
-                        [ ( PNameSM "f"
-                          , LambdaSM (PNameSM "x") <|
+                    (fakeMeta <| LetSM
+                        [ ( PVariableSM "f"
+                          , LambdaSM (PVariableSM "x") <|
                                 if_ (LiteralSM <| unconstrained Type.bool)
                                     (CallSM (NameSM "g") (CallSM (CallSM (NameSM "+") (NameSM "x")) (NameSM "x")))
                                     stringLiteral
                           )
-                        , ( PNameSM "g"
+                        , ( PVariableSM "g"
                           , NameSM "f"
                           )
                         ]
@@ -92,8 +92,8 @@ typeInference =
             equal
                 (typeOf
                     testEnv
-                    (LetSM
-                        [ ( PNameSM "id", LambdaSM (PNameSM "x") <| NameSM "x" )
+                    (fakeMeta <| LetSM
+                        [ ( PVariableSM "id", LambdaSM (PVariableSM "x") <| NameSM "x" )
                         ]
                         (tuple
                             (CallSM (NameSM "id") intLiteral)
@@ -106,10 +106,10 @@ typeInference =
             equal
                 (typeOf
                     testEnv
-                    (LetSM
-                        [ ( PNameSM "id", LambdaSM (PNameSM "x") <| NameSM "x" )
-                        , ( PNameSM "a", CallSM (NameSM "id") intLiteral )
-                        , ( PNameSM "b", CallSM (NameSM "id") stringLiteral )
+                    (fakeMeta <| LetSM
+                        [ ( PVariableSM "id", LambdaSM (PVariableSM "x") <| NameSM "x" )
+                        , ( PVariableSM "a", CallSM (NameSM "id") intLiteral )
+                        , ( PVariableSM "b", CallSM (NameSM "id") stringLiteral )
                         ]
                         (tuple (NameSM "a") (NameSM "b"))
                     )
@@ -121,7 +121,7 @@ typeInference =
                     (Dict.singleton "Just"
                         ( [ 1 ], unconstrained <| TAny 1 => TOpaque "Maybe" [ TAny 1 ] )
                     )
-                    (fakeMeta <| LetSM [ ( PNameSM "x", SpySM (NameSM "Just") 900 ) ] (NameSM "x"))
+                    (fakeMeta <| LetSM [ ( PVariableSM "x", SpySM (NameSM "Just") 900 ) ] (NameSM "x"))
                     |> Infer.finalValue 0
                     |> Result.map Tuple.second
                     |> Result.toMaybe
@@ -131,13 +131,13 @@ typeInference =
                 (unconstrained (TAny 1 => TOpaque "Maybe" [ TAny 1 ]))
         , test "number should propagate" <|
             equal
-                (typeOf
+                (Result.map minimizeTAny <| typeOf
                     (Dict.singleton "+"
                         ( [ 3 ], ( Dict.singleton 3 Number, TAny 3 => TAny 3 => TAny 3 ) )
                     )
-                    (LambdaSM (PNameSM "x") <| CallSM (CallSM (NameSM "+") (NameSM "x")) (NameSM "x"))
+                    (fakeMeta <| LambdaSM (PVariableSM "x") <| CallSM (CallSM (NameSM "+") (NameSM "x")) (NameSM "x"))
                 )
-                (Ok ( Dict.singleton 1 Number, TAny 1 => TAny 1 ))
+                (Ok ( Dict.singleton 0 Number, TAny 0 => TAny 0 ))
         ]
 
 
@@ -148,7 +148,7 @@ regressions =
             equal
                 (typeOf
                     testEnv
-                    (if_
+                    (fakeMeta <| if_
                         (LiteralSM <| unconstrained Type.bool)
                         (NameSM "+")
                         (NameSM "+")

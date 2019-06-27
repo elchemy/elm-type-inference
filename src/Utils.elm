@@ -1,4 +1,4 @@
-module Utils exposing (arbitraryUnion, disjointUnion, getComponentNeighbours, getOrCrash, graphFromLabelsAndNeighbours, graphToLabelsList, stronglyConnectedComponentsDAG)
+module Utils exposing (arbitraryUnion, disjointUnion, getComponentNeighbours, getOrCrash, graphToLabelsList, stronglyConnectedComponentsDAG)
 
 import Dict exposing (Dict)
 import Graph exposing (AcyclicGraph, Graph, stronglyConnectedComponents)
@@ -54,7 +54,6 @@ stronglyConnectedComponentsDAG g =
                 Ok acyclic ->
                     Graph.mapNodes List.singleton g
                         |> Graph.mapEdges (always ())
-                        |> (\a -> Debug.log "graph" (Graph.toString a) |> (\_ -> a))
     in
     case Graph.checkAcyclic result of
         Ok acyclic ->
@@ -95,33 +94,3 @@ arbitraryUnion =
 graphToLabelsList : Graph n e -> List n
 graphToLabelsList =
     Graph.nodes >> List.map .label
-
-
-graphFromLabelsAndNeighbours : List comparable -> Dict comparable (List comparable) -> Graph comparable ()
-graphFromLabelsAndNeighbours labels neighbours =
-    let
-        nodesDict =
-            labels |> List.indexedMap (flip (,)) |> Dict.fromList
-
-        getNodeId a =
-            case Dict.get a nodesDict of
-                Just v ->
-                    v
-
-                _ ->
-                    Debug.crash <| "No node with label " ++ a
-
-        edges =
-            Dict.foldr
-                (\node adjacent acc ->
-                    List.foldr
-                        (\x innerAcc ->
-                            ( getNodeId node, getNodeId x ) :: innerAcc
-                        )
-                        acc
-                        adjacent
-                )
-                []
-                neighbours
-    in
-    Graph.fromNodeLabelsAndEdgePairs labels edges
