@@ -7,6 +7,8 @@ module Infer exposing (typeOf)
 -}
 
 import Dict
+import Graph
+import Graph.Tree
 import Infer.Bindings as Bindings
 import Infer.ConstraintGen exposing (..)
 import Infer.Expression exposing (Expression(..), MExp, MPattern, Pattern(..))
@@ -14,6 +16,7 @@ import Infer.InternalMonad exposing (..)
 import Infer.Monad as External
 import Infer.Scheme exposing (Environment, Scheme, generalize)
 import Infer.Type as Type exposing (($), (=>), RawType(..), Substitution, Type, Unification, sameTypeUnifications, substitute, unconstrained)
+import List.Extra as List
 
 
 {-| Returns a computation that yields the type of the input expression
@@ -231,6 +234,82 @@ generateCircularConstraints environment li =
             )
 
 
+
+resolvePolytypes : ( List ( Type, Type ), List Unification, Environment ) -> ( List ( Type, Type ), List Unification, Environment )
+resolvePolytypes ( types, unifications, env ) =
+    let
+        ( patternTypes, expTypes ) =
+            List.unzip types
+
+        labels =
+            List.unzip unifications
+                |> (\( a, b ) -> a ++ b)
+                |> List.uniqueBy toString
+
+        -- TODO: handle errors properly
+        getLabelId label =
+            List.elemIndex label labels |> Maybe.withDefault -1
+
+        edges =
+            unifications
+                |> List.map
+                    (\( t1, t2 ) ->
+                        let
+                            t1Index =
+                                getLabelId t1
+
+                            t2Index =
+                                getLabelId t2
+                        in
+                        [ ( t1Index, t2Index ), ( t2Index, t1Index ) ]
+                    )
+                |> List.concat
+
+        graph =
+            Graph.fromNodeLabelsAndEdgePairs labels edges
+
+        patternLabelIds =
+            List.map getLabelId patternTypes
+
+        polytypes =
+            Graph.dfsForest patternLabelIds graph
+                |> List.map (Graph.Tree.preOrderList >> List.map (.node >> .label))
+
+
+        resolve pt acc =
+            case pt of
+                [] ->
+                    Nothing
+
+                _ :: [] ->
+                    Nothing
+
+                -- TODO: above should not happen, handle it properly
+                baseType :: a :: other ->
+                    let
+                        nextAcc =
+                            ( baseType, a ) :: acc
+                        kurwa = Debug.log "\naa" (baseType, a, (solve ( Dict.fromList [(0, (Dict.fromList [],TArrow (TAny 1) (TAny 1)))] ) nextAcc))
+                    in
+                    case solve Dict.empty nextAcc of
+                        Err _ ->
+                            Nothing
+
+                        Ok _ ->
+                            case other of
+                                [] ->
+                                    Just nextAcc
+
+                                _ ->
+                                    resolve (baseType :: other) nextAcc
+
+        actualUnifications =
+            List.map2 (\pt t -> resolve pt [] |> Maybe.withDefault [ t ]) polytypes types
+                |> List.concat
+    in
+    ( types, actualUnifications, env )
+
+
 generateConstraints : Environment -> MExp -> Monad ( Type, List Unification, Environment )
 generateConstraints environment ( exp, _ ) =
     case exp of
@@ -307,6 +386,7 @@ generateConstraints environment ( exp, _ ) =
             in
             patternsOrder
                 |> listConstraints generateCircularConstraints environment
+                |> map (\( t, u, e ) -> resolvePolytypes ( List.concat t, u, e ))
                 |> andThen
                     (\( _, bindingsUnifications, bindingsEnv ) ->
                         generateConstraints bindingsEnv body

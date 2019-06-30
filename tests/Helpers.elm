@@ -523,6 +523,7 @@ testEnv =
             , unconstrained <| TAny 1 => TAny 2 => TOpaque "Tuple" [ TAny 1, TAny 2 ]
             )
           )
+        , ("id", ([0], unconstrained <| TAny 0 => TAny 0))
         ]
 
 

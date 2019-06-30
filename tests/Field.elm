@@ -19,6 +19,7 @@ aaa =
                             , ( PVariableSM "b", CallSM (NameSM "id") stringLiteral )
                             ]
                             (tuple (NameSM "a") (NameSM "b"))
+                        -- (tuple (CallSM (NameSM "id") (intLiteral)) (CallSM (NameSM "id") (stringLiteral)))
                     )
                 )
                 (Ok <| unconstrained <| TOpaque "Tuple" [ Type.int, Type.string ])
