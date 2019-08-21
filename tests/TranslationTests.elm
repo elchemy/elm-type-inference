@@ -1,10 +1,12 @@
 module TranslationTests exposing (errors, functions, lets, literals)
 
 import Ast
+import Ast.Common exposing (Pattern(..))
 import Ast.Statement as Statement
 import Ast.Translate as Translate
 import Dict
 import Expect exposing (equal)
+import Helpers exposing (minimizeTAny)
 import Infer
 import Infer.DefaultEnvironment exposing (defaultEnvironment)
 import Infer.Expression as Expression exposing (Expression, MExp)
@@ -43,7 +45,7 @@ lets =
                 "let a b c = a ( b ++ \"1\") (c ++ \"1\") ++ \"1\" in a"
             <|
                 Ok (Type.string => Type.string => Type.string)
-        , test "Lambda" <| code "let a b c = b in a" <| Ok (TAny 4 => TAny 5 => TAny 4)
+        , test "Lambda" <| code "let a b c = b in a" <| Ok (TAny 0 => TAny 1 => TAny 0)
         ]
 
 
@@ -72,6 +74,7 @@ let f l = case l of
         [ test "List sum" <|
             codeWithContext listEnv "let f = foldr (+) 0 in f" <|
                 Ok (Type.list Type.int => Type.int)
+
         -- , test "Also list sum" <|
         --     codeWithContext listEnv listSum <|
         --         Ok (Type.list Type.int => Type.int)
@@ -99,7 +102,7 @@ codeWithContext env input typeOrError =
         |> Result.andThen
             (\res ->
                 case res of
-                    ( _, _, [ ( Statement.FunctionDeclaration "a" [] body, _ ) ] ) ->
+                    ( _, _, [ ( Statement.FunctionDeclaration ( PVariable "a", _ ) body, _ ) ] ) ->
                         Ok body
 
                     _ ->
@@ -107,8 +110,9 @@ codeWithContext env input typeOrError =
             )
         |> Result.map Translate.expression
         |> Result.andThen (typeOf env)
+        |> Result.map (Tuple.mapSecond minimizeTAny)
         |> equal (Result.map unconstrained typeOrError)
-        |> (\a -> \() -> a)
+        |> (\a () -> a)
 
 
 code : String -> Result String RawType -> (() -> Expect.Expectation)

@@ -1,20 +1,27 @@
 module Infer.Type exposing
-    ( Type, RawType(..), (=>), Constraint(..), unconstrained
-    , string, char, bool, int, float, list
+    ( Type, RawType(..), (=>), Constraint(..), unconstrained, Unification
+    , string, char, bool, int, float, list, tuple
+    , makeTuple, makeList
     , toString
     , Substitution, substitute, ($)
     , unify
     , variables
+    , sameTypeUnifications
     )
 
 {-| #
 
-@docs Type, RawType, (=>), Constraint, unconstrained
+@docs Type, RawType, (=>), Constraint, unconstrained, Unification
 
 
 # Constructors for common primitive types
 
-@docs string, char, bool, int, float, list
+@docs string, char, bool, int, float, list, tuple
+
+
+# Constructors for complex types
+
+@docs makeTuple, makeList
 
 @docs toString
 
@@ -23,6 +30,8 @@ module Infer.Type exposing
 @docs unify
 
 @docs variables
+
+@docs sameTypeUnifications
 
 -}
 
@@ -34,6 +43,12 @@ import Set exposing (Set)
 -}
 type alias Type =
     ( Dict Int Constraint, RawType )
+
+
+{-| Contains two types that should be able to be unified
+-}
+type alias Unification =
+    ( Type, Type )
 
 
 {-| Convenience function for building types unconstrained by the built-in typeclasses.
@@ -210,6 +225,75 @@ float =
 list : RawType -> RawType
 list t =
     TOpaque ".List" [ t ]
+
+
+{-| Tuple
+-}
+tuple : List RawType -> RawType
+tuple =
+    TOpaque ".Tuple"
+
+
+mergeConstraints : List Type -> ( Dict Int Constraint, List RawType )
+mergeConstraints =
+    List.foldr
+        (\( tc, raw ) ( constraints, types ) ->
+            ( Dict.union constraints tc, raw :: types )
+        )
+        ( Dict.empty, [] )
+
+
+{-| Create a tuple type from a list of its contents' types
+-}
+makeTuple : List Type -> Type
+makeTuple =
+    mergeConstraints >> Tuple.mapSecond tuple
+
+
+createElemUnifications : List Unification -> List Type -> List Unification
+createElemUnifications acc elems =
+    case elems of
+        x :: y :: tail ->
+            createElemUnifications (( x, y ) :: acc) (y :: tail)
+
+        _ ->
+            acc
+
+
+{-| Create unifications ensuring types from given list are the same
+-}
+sameTypeUnifications : List Type -> List Unification
+sameTypeUnifications =
+    createElemUnifications []
+
+
+{-| Create a list type and unifications needed to be satisfied to create
+a list type from its contents' types
+-}
+makeList :
+    List Type
+    -> RawType
+    -> ( Type, List Unification )
+makeList types freshTVar =
+    -- freshTVar is passed to avoid wrapping this function's output in monad
+    let
+        -- all elements in a list should have the same type so create unifications to enforce it
+        elemUnifications =
+            sameTypeUnifications types
+
+        ( elemConstraints, elemTypes ) =
+            mergeConstraints types
+
+        -- if the list is empty we do not know what should be inside
+        listType =
+            case elemTypes of
+                [] ->
+                    freshTVar
+
+                x :: _ ->
+                    x
+    in
+    ( ( elemConstraints, list listType ), elemUnifications )
 
 
 {-| Textual representation of a type

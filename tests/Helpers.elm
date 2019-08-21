@@ -1,16 +1,36 @@
-module Helpers exposing (..)
+module Helpers exposing (ExpressionSansMeta(..), PatternSansMeta(..), addFakeMeta, arith, checkLetCase, checkRecordsIds, dropMeta, dropPatternMeta, equal, expressionHasUniqueIds, expressionHasUniqueIds_, fakeMeta, fakePatternMeta, hasUniqueId_, if_, intLiteral, isTAny, listHasUniqueIds, listHasUniqueIds_, minimizeTAny, patternHasUniqueIds_, statementHasUniqueIds, statementHasUniqueIds_, statementsHaveUniqueIds, stringLiteral, testEnv, tuple, typeOf, variablesDiffer)
 
-import Ast.Statement exposing (Statement, StatementBase(..))
-import Infer.Expression exposing (..)
-import Infer.Type exposing (Type)
+import Ast.Common exposing (Name, WithMeta)
+import Ast.Identifiers as Ast exposing (..)
+import Dict
+import Expect
+import Infer
+import Infer.Expression as Infer exposing (..)
+import Infer.Monad as Infer
+import Infer.Scheme exposing (Environment, generalize, instantiate)
+import Infer.Type as Type exposing ((=>), Constraint(..), RawType(..), Type, unconstrained)
+import List.Extra as List
 import Set exposing (Set)
+
+
+type PatternSansMeta
+    = PWildSM
+    | PNameSM Name
+    | PLiteralSM Type
+    | PTupleSM (List PatternSansMeta)
+    | PConsSM PatternSansMeta PatternSansMeta
+    | PListSM (List PatternSansMeta)
+    | PRecordSM (List Name)
+    | PAsSM PatternSansMeta Name
+    | PApplicationSM PatternSansMeta PatternSansMeta
 
 
 type ExpressionSansMeta
     = LiteralSM Type
-    | LambdaSM String ExpressionSansMeta
+    | LambdaSM PatternSansMeta ExpressionSansMeta
     | CallSM ExpressionSansMeta ExpressionSansMeta
-    | LetSM (List ( String, ExpressionSansMeta )) ExpressionSansMeta
+    | LetSM (List ( PatternSansMeta, ExpressionSansMeta )) ExpressionSansMeta
+    | CaseSM ExpressionSansMeta (List ( PatternSansMeta, ExpressionSansMeta ))
     | NameSM String
     | SpySM ExpressionSansMeta Int
 
@@ -22,21 +42,93 @@ dropMeta ( e, _ ) =
             LiteralSM t
 
         Lambda s exp ->
-            LambdaSM s (dropMeta exp)
+            LambdaSM (dropPatternMeta s) (dropMeta exp)
 
         Call e1 e2 ->
             CallSM (dropMeta e1) (dropMeta e2)
 
         Let list expression ->
             LetSM
-                (List.map (\( s, exp ) -> ( s, dropMeta exp )) list)
+                (List.map (\( s, exp ) -> ( dropPatternMeta s, dropMeta exp )) list)
                 (dropMeta expression)
+
+        Case expression list ->
+            CaseSM
+                (dropMeta expression)
+                (List.map (\( s, exp ) -> ( dropPatternMeta s, dropMeta exp )) list)
 
         Name s ->
             NameSM s
 
         Spy exp i ->
             SpySM (dropMeta exp) i
+
+
+dropPatternMeta : Infer.MPattern -> PatternSansMeta
+dropPatternMeta ( pattern, _ ) =
+    case pattern of
+        PWild ->
+            PWildSM
+
+        PName n ->
+            PNameSM n
+
+        PLiteral t ->
+            PLiteralSM t
+
+        PTuple li ->
+            PTupleSM (List.map dropPatternMeta li)
+
+        PCons head tail ->
+            PConsSM (dropPatternMeta head) (dropPatternMeta tail)
+
+        PList li ->
+            PListSM (List.map dropPatternMeta li)
+
+        PRecord names ->
+            PRecordSM names
+
+        PAs p n ->
+            PAsSM (dropPatternMeta p) n
+
+        PApplication left right ->
+            PApplicationSM (dropPatternMeta left) (dropPatternMeta right)
+
+
+addFakeMeta : a -> WithMeta a Identifier
+addFakeMeta x =
+    ( x, { id = -1, line = -1, column = -1 } )
+
+
+fakePatternMeta : PatternSansMeta -> Infer.MPattern
+fakePatternMeta p =
+    case p of
+        PWildSM ->
+            addFakeMeta PWild
+
+        PNameSM n ->
+            addFakeMeta <| PName n
+
+        PLiteralSM t ->
+            addFakeMeta <| PLiteral t
+
+        PTupleSM li ->
+            addFakeMeta <| PTuple (List.map fakePatternMeta li)
+
+        PConsSM head tail ->
+            addFakeMeta <| PCons (fakePatternMeta head) (fakePatternMeta tail)
+
+        PListSM li ->
+            addFakeMeta <| PList (List.map fakePatternMeta li)
+
+        PRecordSM names ->
+            addFakeMeta <| PRecord names
+
+        PAsSM p n ->
+            addFakeMeta <| PAs (fakePatternMeta p) n
+
+        PApplicationSM left right ->
+            addFakeMeta <| PApplication (fakePatternMeta left) (fakePatternMeta right)
 
 
 fakeMeta : ExpressionSansMeta -> MExp
@@ -50,13 +142,22 @@ fakeMeta e =
             addMeta <| Literal t
 
         LambdaSM s exp ->
-            addMeta <| Lambda s (fakeMeta exp)
+            addMeta <| Lambda (fakePatternMeta s) (fakeMeta exp)
 
         CallSM e1 e2 ->
             addMeta <| Call (fakeMeta e1) (fakeMeta e2)
 
         LetSM list expression ->
-            addMeta <| Let (List.map (\( s, exp ) -> ( s, fakeMeta exp )) list) (fakeMeta expression)
+            addMeta <|
+                Let
+                    (List.map (\( s, exp ) -> ( fakePatternMeta s, fakeMeta exp )) list)
+                    (fakeMeta expression)
+
+        CaseSM expression list ->
+            addMeta <|
+                Case
+                    (fakeMeta expression)
+                    (List.map (\( s, exp ) -> ( fakePatternMeta s, fakeMeta exp )) list)
 
         NameSM s ->
             addMeta <| Name s
@@ -65,137 +166,102 @@ fakeMeta e =
             addMeta <| Spy (fakeMeta exp) i
 
 
-checkListUniqueIds : List AstMExp -> Set Id -> Maybe (Set Id)
-checkListUniqueIds li ids =
-    List.foldl (\x acc -> Maybe.andThen (hasUniqueIds_ x) acc) (Just ids) li
-
-
-checkNameId : MName -> Set Id -> Maybe (Set Id)
-checkNameId ( _, { id } ) ids =
-    if Set.member id ids then
-        Nothing
-
-    else
-        Just <| Set.insert id ids
-
-
-checkNameListUniqueIds : List MName -> Set Id -> Maybe (Set Id)
-checkNameListUniqueIds li ids =
-    case li of
-        [] ->
-            Just ids
-
-        n :: xs ->
-            checkNameId n ids |> Maybe.andThen (checkNameListUniqueIds xs)
-
-
-checkListAndExp : List AstMExp -> AstMExp -> Set Id -> Maybe (Set Id)
-checkListAndExp li ex ids =
-    hasUniqueIds_ ex ids |> Maybe.andThen (checkListUniqueIds li)
-
-
 checkRecordsIds : List ( MName, AstMExp ) -> Set Id -> Maybe (Set Id)
 checkRecordsIds records ids =
     List.unzip records
         |> (\( names, exps ) ->
-                checkNameListUniqueIds names ids
+                listHasUniqueIds_ hasUniqueId_ names ids
                     |> Maybe.andThen
-                        (checkListUniqueIds exps)
+                        (listHasUniqueIds_ expressionHasUniqueIds_ exps)
            )
 
 
-checkLetCase : List ( AstMExp, AstMExp ) -> AstMExp -> Set Id -> Maybe (Set Id)
+checkLetCase : List ( Ast.MPattern, AstMExp ) -> AstMExp -> Set Id -> Maybe (Set Id)
 checkLetCase li exp ids =
     let
-        ( li1, li2 ) =
+        ( patterns, exps ) =
             List.unzip li
     in
-    checkListUniqueIds li1 ids |> Maybe.andThen (checkListAndExp li2 exp)
+    expressionHasUniqueIds_ exp ids
+        |> Maybe.andThen (listHasUniqueIds_ patternHasUniqueIds_ patterns)
+        |> Maybe.andThen (listHasUniqueIds_ expressionHasUniqueIds_ exps)
 
 
-hasUniqueIds_ : AstMExp -> Set Id -> Maybe (Set Id)
-hasUniqueIds_ ( e, { id } ) ids =
-    if Set.member id ids then
-        Nothing
+expressionHasUniqueIds_ : AstMExp -> Set Id -> Maybe (Set Id)
+expressionHasUniqueIds_ (( e, { id } ) as whole) ids =
+    hasUniqueId_ whole ids
+        |> (Maybe.andThen <|
+                \newIds ->
+                    case e of
+                        EList li ->
+                            listHasUniqueIds_ expressionHasUniqueIds_ li ids
 
-    else
-        case e of
-            ECharacter _ ->
-                Just (Set.insert id ids)
+                        ETuple li ->
+                            listHasUniqueIds_ expressionHasUniqueIds_ li ids
 
-            EString _ ->
-                Just (Set.insert id ids)
+                        EAccess exp li ->
+                            expressionHasUniqueIds_ exp ids |> Maybe.andThen (listHasUniqueIds_ hasUniqueId_ li)
 
-            EInteger _ ->
-                Just (Set.insert id ids)
+                        ERecord records ->
+                            checkRecordsIds records ids
 
-            EFloat _ ->
-                Just (Set.insert id ids)
+                        ERecordUpdate n records ->
+                            hasUniqueId_ n ids
+                                |> Maybe.andThen (checkRecordsIds records)
 
-            EVariable _ ->
-                Just (Set.insert id ids)
+                        EIf e1 e2 e3 ->
+                            expressionHasUniqueIds_ e1 ids
+                                |> Maybe.andThen (expressionHasUniqueIds_ e2)
+                                |> Maybe.andThen (expressionHasUniqueIds_ e3)
 
-            EList li ->
-                checkListUniqueIds li ids
+                        ELet li exp ->
+                            checkLetCase li exp ids
 
-            ETuple li ->
-                checkListUniqueIds li ids
+                        ECase exp li ->
+                            checkLetCase li exp ids
 
-            EAccess exp li ->
-                hasUniqueIds_ exp ids |> Maybe.andThen (checkNameListUniqueIds li)
+                        ELambda li exp ->
+                            expressionHasUniqueIds_ exp ids |> Maybe.andThen (listHasUniqueIds_ patternHasUniqueIds_ li)
 
-            EAccessFunction _ ->
-                Just (Set.insert id ids)
+                        EApplication e1 e2 ->
+                            expressionHasUniqueIds_ e1 ids
+                                |> Maybe.andThen (expressionHasUniqueIds_ e2)
 
-            ERecord records ->
-                checkRecordsIds records ids
+                        EBinOp e1 e2 e3 ->
+                            expressionHasUniqueIds_ e1 ids
+                                |> Maybe.andThen (expressionHasUniqueIds_ e2)
+                                |> Maybe.andThen (expressionHasUniqueIds_ e3)
 
-            ERecordUpdate n records ->
-                checkNameId n ids
-                    |> Maybe.andThen (checkRecordsIds records)
+                        EExternal _ exp ->
+                            expressionHasUniqueIds_ exp ids
 
-            EIf e1 e2 e3 ->
-                hasUniqueIds_ e1 ids
-                    |> Maybe.andThen (hasUniqueIds_ e2)
-                    |> Maybe.andThen (hasUniqueIds_ e3)
-
-            ELet li exp ->
-                checkLetCase li exp ids
-
-            ECase exp li ->
-                checkLetCase li exp ids
-
-            ELambda li exp ->
-                hasUniqueIds_ exp ids |> Maybe.andThen (checkListUniqueIds li)
-
-            EApplication e1 e2 ->
-                hasUniqueIds_ e1 ids
-                    |> Maybe.andThen (hasUniqueIds_ e2)
-
-            EBinOp e1 e2 e3 ->
-                hasUniqueIds_ e1 ids
-                    |> Maybe.andThen (hasUniqueIds_ e2)
-                    |> Maybe.andThen (hasUniqueIds_ e3)
+                        _ ->
+                            Just newIds
+           )
 
 
-listHasUniqueIds_ : List AstMExp -> Set Id -> Maybe (Set Id)
-listHasUniqueIds_ list ids =
+listHasUniqueIds_ :
+    (WithMeta a Identifier -> Set Id -> Maybe (Set Id))
+    -> List (WithMeta a Identifier)
+    -> Set Id
+    -> Maybe (Set Id)
+listHasUniqueIds_ checker list ids =
     case list of
         [] ->
             Just ids
 
         exp :: rest ->
-            case hasUniqueIds_ exp ids of
+            case checker exp ids of
                 Nothing ->
                     Nothing
 
                 Just newIds ->
-                    listHasUniqueIds_ rest newIds
+                    listHasUniqueIds_ checker rest newIds
 
 
-listHasUniqueIds : List AstMExp -> Bool
-listHasUniqueIds l =
-    case listHasUniqueIds_ l Set.empty of
+listHasUniqueIds : (WithMeta a Identifier -> Set Id -> Maybe (Set Id)) -> List (WithMeta a Identifier) -> Bool
+listHasUniqueIds checker l =
+    case listHasUniqueIds_ checker l Set.empty of
         Nothing ->
             False
 
@@ -203,9 +269,9 @@ listHasUniqueIds l =
             True
 
 
-hasUniqueIds : AstMExp -> Bool
-hasUniqueIds exp =
-    case hasUniqueIds_ exp Set.empty of
+expressionHasUniqueIds : AstMExp -> Bool
+expressionHasUniqueIds exp =
+    case expressionHasUniqueIds_ exp Set.empty of
         Nothing ->
             False
 
@@ -213,42 +279,215 @@ hasUniqueIds exp =
             True
 
 
-generateStatementIds : Statement -> List AstMExp
-generateStatementIds ( s, _ ) =
-    case s of
-        FunctionDeclaration _ vars body ->
-            generateListIds (body :: vars)
+hasUniqueId_ : WithMeta a Identifier -> Set Id -> Maybe (Set Id)
+hasUniqueId_ ( _, { id } ) ids =
+    if Set.member id ids then
+        Nothing
+
+    else
+        Just (Set.insert id ids)
+
+
+patternHasUniqueIds_ : Ast.MPattern -> Set Id -> Maybe (Set Id)
+patternHasUniqueIds_ (( p, { id } ) as whole) ids =
+    hasUniqueId_ whole ids
+        |> (Maybe.andThen <|
+                \newIds ->
+                    case p of
+                        APTuple li ->
+                            listHasUniqueIds_ patternHasUniqueIds_ li newIds
+
+                        APCons head tail ->
+                            patternHasUniqueIds_ head newIds
+
+                        APList li ->
+                            listHasUniqueIds_ patternHasUniqueIds_ li newIds
+
+                        APRecord names ->
+                            listHasUniqueIds_ hasUniqueId_ names newIds
+
+                        APAs pattern _ ->
+                            patternHasUniqueIds_ pattern newIds
+
+                        APApplication left right ->
+                            patternHasUniqueIds_ left newIds |> Maybe.andThen (patternHasUniqueIds_ right)
+
+                        _ ->
+                            Just <| Set.insert id ids
+           )
+
+
+statementHasUniqueIds_ :
+    ( AstStatement, Ast.Common.Located Identifier )
+    -> Set Id
+    -> Maybe (Set Id)
+statementHasUniqueIds_ (( s, { id } ) as whole) ids =
+    hasUniqueId_ whole ids
+        |> (Maybe.andThen <|
+                \newIds ->
+                    case s of
+                        SPortDeclaration _ _ exp ->
+                            expressionHasUniqueIds_ exp newIds
+
+                        SFunctionDeclaration pattern exp ->
+                            patternHasUniqueIds_ pattern newIds
+                                |> Maybe.andThen (expressionHasUniqueIds_ exp)
+
+                        _ ->
+                            Just newIds
+           )
+
+
+statementHasUniqueIds : MStatement -> Bool
+statementHasUniqueIds s =
+    case statementHasUniqueIds_ s Set.empty of
+        Nothing ->
+            False
 
         _ ->
-            []
+            True
 
 
-generateStatementsIds : List Statement -> List AstMExp
-generateStatementsIds statements =
-    List.foldr
-        (\( x, _ ) acc ->
-            case x of
-                FunctionDeclaration _ vars body ->
-                    body :: vars ++ acc
+statementsHaveUniqueIds : List MStatement -> Bool
+statementsHaveUniqueIds =
+    listHasUniqueIds statementHasUniqueIds_
+
+
+typeOf : Environment -> ExpressionSansMeta -> Result String Type
+typeOf env exp =
+    Infer.typeOf env (fakeMeta exp)
+        |> Infer.finalValue 0
+        |> Result.map Tuple.first
+
+
+equal : a -> a -> () -> Expect.Expectation
+equal a b =
+    \() -> Expect.equal a b
+
+
+variablesDiffer : Type -> Type -> () -> Expect.Expectation
+variablesDiffer a b =
+    \() ->
+        Expect.true "parts other than type variables differ"
+            (Type.unify a b
+                |> Result.map (Dict.values >> List.all (Tuple.second >> isTAny))
+                |> Result.withDefault False
+            )
+
+
+isTAny : RawType -> Bool
+isTAny x =
+    case x of
+        TAny _ ->
+            True
+
+        _ ->
+            False
+
+
+stringLiteral : ExpressionSansMeta
+stringLiteral =
+    LiteralSM <| unconstrained Type.string
+
+
+intLiteral : ExpressionSansMeta
+intLiteral =
+    LiteralSM <| unconstrained Type.int
+
+
+if_ :
+    ExpressionSansMeta
+    -> ExpressionSansMeta
+    -> ExpressionSansMeta
+    -> ExpressionSansMeta
+if_ a b c =
+    CallSM (CallSM (CallSM (NameSM "if") a) b) c
+
+
+testEnv : Environment
+testEnv =
+    Dict.fromList
+        [ ( "if"
+          , ( [ 1 ]
+            , unconstrained <| Type.bool => TAny 1 => TAny 1 => TAny 1
+            )
+          )
+        , ( "+", arith )
+        , ( "tuple2"
+          , ( [ 1, 2 ]
+            , unconstrained <| TAny 1 => TAny 2 => TOpaque "Tuple" [ TAny 1, TAny 2 ]
+            )
+          )
+        ]
+
+
+tuple : ExpressionSansMeta -> ExpressionSansMeta -> ExpressionSansMeta
+tuple a b =
+    CallSM (CallSM (NameSM "tuple2") a) b
+
+
+arith : ( List number, Type )
+arith =
+    ( [ 1 ], unconstrained <| TAny 1 => TAny 1 => TAny 1 )
+
+
+minimizeTAny : RawType -> RawType
+minimizeTAny t =
+    let
+        arrowToList a =
+            case a of
+                TArrow left right ->
+                    left :: arrowToList right
 
                 _ ->
-                    acc
-        )
-        []
-        statements
-        |> generateListIds
+                    [ a ]
 
+        listToArrow l =
+            case l of
+                [] ->
+                    Debug.crash "No empty lists"
 
-statementHasUniqueIds : Statement -> Bool
-statementHasUniqueIds ( s, _ ) =
-    case s of
-        FunctionDeclaration _ vars body ->
-            listHasUniqueIds (generateListIds (body :: vars))
+                x :: [] ->
+                    x
 
-        _ ->
-            True
+                x :: y :: [] ->
+                    TArrow x y
 
+                x :: y :: z ->
+                    TArrow x (listToArrow (y :: z))
 
-statementsHaveUniqueIds : List Statement -> Bool
-statementsHaveUniqueIds =
-    generateStatementsIds >> listHasUniqueIds
+        typesList =
+            arrowToList t
+
+        minimizedIds =
+            List.filterMap
+                (\el ->
+                    case el of
+                        TAny id ->
+                            Just id
+
+                        _ ->
+                            Nothing
+                )
+                typesList
+                |> List.unique
+                |> List.sort
+                |> List.indexedMap (flip (,))
+                |> Dict.fromList
+    in
+    typesList
+        |> List.map
+            (\el ->
+                case el of
+                    TAny id ->
+                        case Dict.get id minimizedIds of
+                            Nothing ->
+                                el
+
+                            Just newId ->
+                                TAny newId
+
+                    _ ->
+                        el
+            )
+        |> listToArrow

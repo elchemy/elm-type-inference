@@ -9,11 +9,11 @@ module Infer exposing (typeOf)
 import Dict
 import Infer.Bindings as Bindings
 import Infer.ConstraintGen exposing (..)
-import Infer.Expression exposing (Expression(..), MExp)
+import Infer.Expression exposing (Expression(..), MExp, MPattern, Pattern(..))
 import Infer.InternalMonad exposing (..)
 import Infer.Monad as External
 import Infer.Scheme exposing (Environment, Scheme, generalize)
-import Infer.Type as Type exposing (($), (=>), RawType(..), Substitution, Type, substitute)
+import Infer.Type as Type exposing (($), (=>), RawType(..), Substitution, Type, Unification, sameTypeUnifications, substitute, unconstrained)
 
 
 {-| Returns a computation that yields the type of the input expression
@@ -23,14 +23,14 @@ typeOf : Environment -> MExp -> External.Monad ( Type, Substitution )
 typeOf env exp =
     generateConstraints env exp
         |> andThen
-            (\( t, cs ) ->
+            (\( t, cs, _ ) ->
                 solve Dict.empty cs
                     |> Result.map (\s -> ( Type.substitute s t, s ))
                     |> External.fromResult
             )
 
 
-solve : Substitution -> List Constraint -> Result String Substitution
+solve : Substitution -> List Unification -> Result String Substitution
 solve substitution constraints =
     case constraints of
         [] ->
@@ -46,7 +46,7 @@ solve substitution constraints =
                     )
 
 
-substituteConstraint : Substitution -> Constraint -> Constraint
+substituteConstraint : Substitution -> Unification -> Unification
 substituteConstraint substitution ( l, r ) =
     let
         f =
@@ -62,96 +62,291 @@ freshTypevar =
         |> map TAny
 
 
-generateConstraints : Environment -> MExp -> Monad ( Type, List Constraint )
+listConstraints : (Environment -> a -> Monad ( Type, List Unification, Environment )) -> Environment -> List a -> Monad ( List Type, List Unification, Environment )
+listConstraints generator env li =
+    let
+        generateElem elem ( types, unifications, newEnv ) =
+            generator newEnv elem
+                |> map
+                    (\( elemType, elemUnifications, elemEnv ) ->
+                        ( elemType :: types, elemUnifications ++ unifications, elemEnv )
+                    )
+    in
+    List.foldr (andThen << generateElem) (pure ( [], [], env )) li
+
+
+generatePatternConstraints : Environment -> MPattern -> Monad ( Type, List Unification, Environment )
+generatePatternConstraints env ( p, _ ) =
+    case p of
+        PWild ->
+            map (\tv -> ( unconstrained tv, [], env )) freshTypevar
+
+        PName n ->
+            map (\tv -> ( unconstrained tv, [], extend env n (unconstrained tv) )) freshTypevar
+
+        PLiteral t ->
+            pure ( t, [], env )
+
+        PTuple li ->
+            listConstraints generatePatternConstraints env li
+                |> map
+                    (\( types, unifications, newEnv ) ->
+                        ( Type.makeTuple types
+                        , unifications
+                        , newEnv
+                        )
+                    )
+
+        PCons head tail ->
+            generatePatternConstraints env head
+                |> andThen
+                    (\(( ht, hu, hEnv ) as hg) ->
+                        map ((,) hg) (generatePatternConstraints hEnv tail)
+                    )
+                |> map
+                    (\( headGen, tailGen ) ->
+                        let
+                            ( ( headTC, headRawType ), headUnifications, _ ) =
+                                headGen
+
+                            ( tailType, tailUnifications, newEnv ) =
+                                tailGen
+
+                            -- Type of the whole expression is a list of head type
+                            wholeType =
+                                ( headTC, Type.list headRawType )
+
+                            -- And it must be the same as tail type
+                            uniformityUnification =
+                                ( wholeType, tailType )
+                        in
+                        ( wholeType, uniformityUnification :: (headUnifications ++ tailUnifications), newEnv )
+                    )
+
+        PList li ->
+            map2
+                (\( types, unifications, newEnv ) freshTVar ->
+                    Type.makeList types freshTVar
+                        |> (\( listType, listUnifications ) ->
+                                ( listType, listUnifications ++ unifications, newEnv )
+                           )
+                )
+                (listConstraints generatePatternConstraints env li)
+                freshTypevar
+
+        PRecord names ->
+            -- create new type variable for each name
+            List.map (always freshTypevar) names
+                |> combine
+                |> map
+                    (\typeVars ->
+                        let
+                            namesWithTypes =
+                                List.map2 (,) names typeVars
+                        in
+                        ( unconstrained <|
+                            TRecord (Dict.fromList namesWithTypes)
+                        , []
+                          -- save types for variables in the environment
+                        , List.foldr (\( name, typeVar ) acc -> extend acc name (unconstrained typeVar)) env namesWithTypes
+                        )
+                    )
+
+        PAs pattern name ->
+            generatePatternConstraints env pattern
+                |> map
+                    (\( pType, unifications, newEnv ) ->
+                        ( pType, unifications, extend newEnv name pType )
+                    )
+
+        PApplication left right ->
+            generatePatternConstraints env left
+                |> andThen
+                    (\( lType, lUni, lEnv ) ->
+                        map ((,) ( lType, lUni )) (generatePatternConstraints lEnv right)
+                    )
+                |> map2
+                    (\typeVar ( ( leftType, leftUnifications ), ( ( rightTC, rawRightType ), rightUnifications, newEnv ) ) ->
+                        ( unconstrained typeVar
+                        , ( leftType, ( rightTC, rawRightType => typeVar ) )
+                            :: (leftUnifications ++ rightUnifications)
+                        , newEnv
+                        )
+                    )
+                    freshTypevar
+
+
+generateBindingConstraints :
+    Environment
+    -> ( MPattern, MExp )
+    -> Monad ( Type, List Unification, Environment )
+generateBindingConstraints env ( pat, exp ) =
+    generatePatternConstraints env pat
+        |> andThen
+            (\( patType, patUnifications, patEnv ) ->
+                generateConstraints patEnv exp
+                    |> map
+                        (\( expType, expUnifications, expEnv ) ->
+                            ( expType
+                            , ( expType, patType ) :: patUnifications ++ expUnifications
+                            , expEnv
+                            )
+                        )
+            )
+
+
+generateConstraints : Environment -> MExp -> Monad ( Type, List Unification, Environment )
 generateConstraints environment ( exp, _ ) =
     case exp of
         Name name ->
             variable environment name
-                |> map (\x -> ( x, [] ))
+                |> map (\x -> ( x, [], environment ))
 
         Literal t ->
-            pure ( t, [] )
+            pure ( t, [], environment )
 
+        -- App rule
+        -- e0 : t0, e1 : t1, t' = freshVar, unify(t0, t1 -> t')
+        -- => e0 (e1) : t'
         Call function argument ->
-            map3
-                (\this ( f, fc ) ( ( aTC, a ), ac ) ->
-                    ( ( Dict.empty, this )
-                    , fc ++ ac ++ [ ( f, ( aTC, a => this ) ) ]
-                    )
-                )
-                freshTypevar
-                (generateConstraints environment function)
-                (generateConstraints environment argument)
-
-        Lambda argument body ->
-            freshTypevar
+            generateConstraints environment function
                 |> andThen
-                    (\argType ->
-                        generateConstraints (extend environment argument ( Dict.empty, argType )) body
+                    (\( funType, funUnifications, funEnv ) ->
+                        map ((,) ( funType, funUnifications )) <|
+                            generateConstraints funEnv argument
+                    )
+                |> andThen
+                    (\( fun, ( argType, argUnifications, argEnv ) ) ->
+                        map
+                            (\fresh ->
+                                ( fun
+                                , ( argType, argUnifications )
+                                , argEnv
+                                , fresh
+                                )
+                            )
+                            freshTypevar
+                    )
+                |> map
+                    (\( fun, arg, env, this ) ->
+                        let
+                            ( funType, funUnifications ) =
+                                fun
+
+                            ( ( argTC, argRawType ), argUnifications ) =
+                                arg
+                        in
+                        -- infer that e0 (e1) : t'
+                        ( unconstrained this
+                          -- propagate constraints
+                        , funUnifications
+                            ++ argUnifications
+                            -- Demand that unify(t0, t1 -> t')
+                            ++ [ ( funType, ( argTC, argRawType => this ) ) ]
+                        , env
+                        )
+                    )
+
+        -- Abs rule
+        -- t = freshVar, x: t => e : t'
+        -- => \x -> e : t -> t'
+        Lambda argument body ->
+            generatePatternConstraints environment argument
+                |> andThen
+                    (\( ( argTC, argType ), patternUnifications, argEnv ) ->
+                        generateConstraints argEnv body
                             |> map
-                                (\( ( bodyTC, bodyType ), bodyCons ) ->
-                                    ( ( bodyTC, argType => bodyType ), bodyCons )
+                                (\( ( bodyTC, bodyType ), bodyUnifications, bodyEnv ) ->
+                                    ( ( Dict.union argTC bodyTC, argType => bodyType )
+                                    , patternUnifications ++ bodyUnifications
+                                    , bodyEnv
+                                    )
                                 )
                     )
 
         Let bindings body ->
-            Bindings.group bindings
-                |> List.foldl (addBindingGroupToEnv >> andThen) (pure environment)
+            let
+                patternsOrder =
+                    Bindings.group bindings
+            in
+            patternsOrder
+                |> List.foldr
+                    (\bindingGroup acc ->
+                        acc
+                            |> andThen
+                                (\( accUnifications, accEnv ) ->
+                                    listConstraints generateBindingConstraints environment bindingGroup
+                                        |> map
+                                            (\( _, bindingUnifications, newEnv ) ->
+                                                ( bindingUnifications ++ accUnifications, newEnv )
+                                            )
+                                )
+                    )
+                    (pure ( [], environment ))
                 |> andThen
-                    (\env -> generateConstraints env body)
+                    (\( bindingsUnifications, bindingsEnv ) ->
+                        generateConstraints bindingsEnv body
+                            |> map
+                                (\( bodyType, bodyUnifications, newEnv ) ->
+                                    ( bodyType, bodyUnifications ++ bindingsUnifications, newEnv )
+                                )
+                    )
 
+        Case expression matches ->
+            let
+                ( patterns, results ) =
+                    List.unzip matches
+            in
+            generateConstraints environment expression
+                |> andThen
+                    (\( expType, expUnifications, expEnv ) ->
+                        listConstraints generatePatternConstraints expEnv patterns
+                            |> map
+                                (\( patsTypes, patsUnifications, patsEnv ) ->
+                                    ( ( expType, expUnifications ), ( patsTypes, patsUnifications ), patsEnv )
+                                )
+                    )
+                |> andThen
+                    (\( expC, patsC, patsEnv ) ->
+                        listConstraints generateConstraints patsEnv results
+                            |> map (\( resTypes, resUnifications, resEnv ) -> ( expC, patsC, ( resTypes, resUnifications ), resEnv ))
+                    )
+                |> map
+                    (\( expC, patsC, resC, newEnv ) ->
+                        let
+                            ( expType, expUnifications ) =
+                                expC
+
+                            ( patsTypes, patsUnifications ) =
+                                patsC
+
+                            ( resTypes, resUnifications ) =
+                                resC
+
+                            resultsConsistency =
+                                Type.sameTypeUnifications resTypes
+
+                            patternsConsistency =
+                                Type.sameTypeUnifications <| expType :: patsTypes
+
+                            unifications =
+                                expUnifications
+                                    ++ patsUnifications
+                                    ++ resUnifications
+                                    ++ resultsConsistency
+                                    ++ patternsConsistency
+                        in
+                        case resTypes of
+                            x :: _ ->
+                                ( x, unifications, newEnv )
+
+                            _ ->
+                                Debug.crash "Need at least one pattern in case"
+                    )
 
         Spy exp tag ->
             generateConstraints environment exp
                 |> map
-                    (\( typ, constraints ) ->
-                        ( typ, constraints ++ [ ( ( Dict.empty, TAny tag ), typ ) ] )
+                    (\( typ, constraints, newEnv ) ->
+                        ( typ, constraints ++ [ ( ( Dict.empty, TAny tag ), typ ) ], newEnv )
                     )
-
-
-addBindingGroupToEnv : List ( String, MExp ) -> Environment -> Monad Environment
-addBindingGroupToEnv bindings origEnv =
-    let
-        bindings_ =
-            List.map (\( n, e ) -> map (\tv -> ( n, e, ( Dict.empty, tv ) )) freshTypevar) bindings
-                |> combine
-
-        extendedEnv =
-            map (List.foldl (\( n, _, tv ) env -> extend env n tv) origEnv) bindings_
-
-        typesAndConstraints =
-            map2
-                (\bin env ->
-                    bin
-                        |> List.map
-                            (\( _, e, tv ) ->
-                                map (\( t, cs ) -> ( t, ( tv, t ) :: cs )) <|
-                                    generateConstraints env e
-                            )
-                        |> combine
-                )
-                bindings_
-                extendedEnv
-                |> andThen identity
-
-        subs =
-            List.map Tuple.second
-                >> List.concat
-                >> solve Dict.empty
-                >> fromResult
-    in
-    typesAndConstraints
-        |> andThen
-            (\tcs ->
-                subs tcs
-                    |> andThen
-                        (\subs ->
-                            List.map Tuple.first tcs
-                                |> List.map (substitute subs >> generalize origEnv)
-                                |> List.map2 (,) (List.map Tuple.first bindings)
-                                |> Dict.fromList
-                                |> (\new -> Dict.union new origEnv)
-                                |> pure
-                                |> addSubstitution subs
-                        )
-            )

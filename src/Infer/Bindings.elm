@@ -1,77 +1,114 @@
 module Infer.Bindings exposing (group)
 
 import Dict exposing (Dict)
-import Infer.Expression exposing (Expression(..), MExp)
-import List.Extra as List exposing (dropWhile, unique)
+import Graph exposing (AcyclicGraph, Edge, Graph, Node)
+import Infer.Expression exposing (Expression(..), MExp, MPattern, Pattern(..))
+import List.Extra as List
+import Result exposing (Result(..))
 import Set exposing (Set)
+import Utils exposing (..)
 
 
-group : List ( String, MExp ) -> List (List ( String, MExp ))
+{-| Create groups of mutually dependent free variables and sort those groups so that dependencies come first
+-}
+group : List ( MPattern, MExp ) -> List (List ( MPattern, MExp ))
 group bindings_ =
     let
+        ( patterns, expressions ) =
+            List.unzip bindings_
+
+        boundList =
+            List.map boundVariables patterns
+
+        numberedMatches =
+            List.indexedMap (,) bindings_ |> Dict.fromList
+
+        varsToMatchIds =
+            List.map2 (\vars pattern -> List.map (flip (,) pattern) <| Set.toList vars) boundList (Dict.keys numberedMatches)
+                |> List.concat
+                |> Dict.fromList
+
+        areUnique =
+            List.foldr (Result.andThen << disjointUnion) (Ok Set.empty) boundList
+
         bindings =
-            Dict.fromList bindings_
+            List.map2 (\exp -> Set.foldr (\x acc -> ( x, exp ) :: acc) []) expressions boundList
+                |> List.concat
+                |> Dict.fromList
 
-        nodes =
-            Dict.keys bindings
+        bound =
+            arbitraryUnion boundList
 
-        neighbors =
+        neighbours =
             Dict.map
-                (always (freeVariables >> Set.filter (\x -> List.member x nodes)))
-                bindings
-    in
-    stronglyConnected nodes neighbors
-        |> sortGroups neighbors
-        |> List.map
-            (List.map
-                (\name ->
-                    ( name
-                    , Dict.get name bindings
-                        |> Maybe.withDefault ( Name "error", { id = -1, column = -1, line = -1 } )
-                    )
+                (\v exp ->
+                    freeVariables exp
+                        |> (\free ->
+                                Set.intersect free bound
+                           )
+                        |> Set.toList
                 )
-            )
+                bindings
 
+        findPatterns vars =
+            List.map (flip getOrCrash varsToMatchIds) vars
+                |> List.unique
+                |> List.map (flip getOrCrash numberedMatches)
 
-sortGroups : Dict comparable (Set comparable) -> List (List comparable) -> List (List comparable)
-sortGroups neighborDict groups =
-    let
-        groupNeighbors group =
-            List.map neighbors group
-                |> List.foldl Set.union Set.empty
-                |> Set.map groupContaining
-                |> Set.remove group
-                |> Set.toList
-
-        neighbors x =
-            Dict.get x neighborDict
-                |> Maybe.withDefault Set.empty
-
-        groupContaining x =
-            List.find (List.member x) groups
-                -- this should be impossible, as the groups do not overlap
-                |> Maybe.withDefault []
+        labels =
+            List.concatMap Set.toList boundList
     in
-    depsFirst groups groupNeighbors
+    case areUnique of
+        Ok _ ->
+            graphFromLabelsAndNeighbours labels neighbours
+                |> stronglyConnectedComponentsDAG
+                |> Graph.topologicalSort
+                |> List.map (.node >> .label >> findPatterns)
+
+        Err s ->
+            Debug.crash <| "Repeated use of variables: " ++ toString (Set.toList s)
 
 
-{-| Returns the nodes of a directed acyclic graph (a tree) in an order where
-all children of a node come before the node
+{-| Get a set of variables bound by a pattern
 -}
-depsFirst : List comparable -> (comparable -> List comparable) -> List comparable
-depsFirst nodes neighbors =
-    let
-        dependencies node =
-            (neighbors node
-                |> List.concatMap dependencies
-                |> unique
-            )
-                ++ [ node ]
-    in
-    List.concatMap dependencies nodes
-        |> unique
+boundVariables : MPattern -> Set String
+boundVariables ( p, _ ) =
+    case p of
+        PWild ->
+            Set.empty
+
+        PName n ->
+            Set.singleton n
+
+        PLiteral _ ->
+            Set.empty
+
+        PTuple elems ->
+            List.map boundVariables elems |> List.foldl Set.union Set.empty
+
+        PCons head tail ->
+            Set.union (boundVariables head) (boundVariables tail)
+
+        PList elems ->
+            List.map boundVariables elems |> List.foldl Set.union Set.empty
+
+        PRecord names ->
+            Set.fromList names
+
+        PAs body name ->
+            Set.union (boundVariables body) (Set.singleton name)
+
+        PApplication (( leftBody, _ ) as left) right ->
+            case leftBody of
+                PApplication _ _ ->
+                    Set.union (boundVariables left) (boundVariables right)
+
+                _ ->
+                    boundVariables right
 
 
+{-| Get a set of free variables occurring in an expression
+-}
 freeVariables : MExp -> Set String
 freeVariables ( e, _ ) =
     case e of
@@ -79,13 +116,25 @@ freeVariables ( e, _ ) =
             Set.singleton x
 
         Lambda arg exp ->
-            freeVariables exp
-                |> Set.remove arg
+            Set.diff (freeVariables exp) (boundVariables arg)
 
         Let bindings exp ->
-            List.map Tuple.first bindings
-                |> Set.fromList
-                |> Set.diff (freeVariables exp)
+            List.unzip bindings
+                |> Tuple.mapFirst (arbitraryUnion << List.map boundVariables)
+                |> Tuple.mapSecond
+                    (Set.union (freeVariables exp)
+                        << (arbitraryUnion << List.map freeVariables)
+                    )
+                |> (\( bound, free ) -> Set.diff free bound)
+
+        Case exp bindings ->
+            List.unzip bindings
+                |> Tuple.mapFirst (arbitraryUnion << List.map boundVariables)
+                |> Tuple.mapSecond
+                    (Set.union (freeVariables exp)
+                        << (arbitraryUnion << List.map freeVariables)
+                    )
+                |> (\( bound, free ) -> Set.diff free bound)
 
         Call e1 e2 ->
             Set.union (freeVariables e1) (freeVariables e2)
@@ -95,57 +144,3 @@ freeVariables ( e, _ ) =
 
         Spy exp _ ->
             freeVariables exp
-
-
-stronglyConnected : List comparable -> Dict comparable (Set comparable) -> List (List comparable)
-stronglyConnected nodes neighbors =
-    let
-        component n =
-            Set.intersect
-                (connected n neighbors)
-                (connected n (reverseDict neighbors))
-
-        ( components, _ ) =
-            List.foldl
-                (\node ( components, used ) ->
-                    if not <| Set.member node used then
-                        let
-                            new =
-                                component node
-                        in
-                        ( new :: components, Set.union new used )
-
-                    else
-                        ( components, used )
-                )
-                ( [], Set.empty )
-                nodes
-    in
-    components
-        |> List.map Set.toList
-
-
-connected : comparable -> Dict comparable (Set comparable) -> Set comparable
-connected node neighbors =
-    let
-        connected_ node visited =
-            if Set.member node visited then
-                visited
-
-            else
-                Dict.get node neighbors
-                    |> Maybe.withDefault Set.empty
-                    |> Set.foldl connected_ (Set.insert node visited)
-    in
-    connected_ node Set.empty
-
-
-reverseDict : Dict comparable (Set comparable) -> Dict comparable (Set comparable)
-reverseDict dict =
-    let
-        addEntry ( k, v ) =
-            Dict.update k (Maybe.withDefault Set.empty >> Set.insert v >> Just)
-    in
-    Dict.toList dict
-        |> List.concatMap (\( k, vs ) -> List.map (\v -> ( v, k )) <| Set.toList vs)
-        |> List.foldl addEntry Dict.empty

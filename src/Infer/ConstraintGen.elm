@@ -1,14 +1,10 @@
-module Infer.ConstraintGen exposing (..)
+module Infer.ConstraintGen exposing (extend, extendGeneralized, variable)
 
 import Dict exposing (Dict)
 import Infer.InternalMonad exposing (..)
 import Infer.Monad as External
 import Infer.Scheme exposing (Environment, Scheme, generalize, instantiate)
 import Infer.Type as Type exposing (($), Type)
-
-
-type alias Constraint =
-    ( Type, Type )
 
 
 variable : Environment -> String -> Monad Type
